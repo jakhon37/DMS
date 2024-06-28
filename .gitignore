@@ -1,0 +1,4 @@
+models/face_allignment/weights
+models/face_detect/weights
+models/face_attributes/weights
+models/headpose/weights
