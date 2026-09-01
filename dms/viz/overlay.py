@@ -19,6 +19,8 @@ def draw_faces(
     mar: Optional[float] = None,
     pose: Optional[Tuple[float, float, float]] = None,
     track_id: Optional[int] = None,
+    alerts: Optional[List[str]] = None,
+    yaw_rel: Optional[float] = None,
 ) -> np.ndarray:
     vis = bgr.copy()
     for f in faces:
@@ -75,6 +77,13 @@ def draw_faces(
     if track_id is not None:
         y += 26
         cv2.putText(vis, "id=%d" % track_id, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
+    if yaw_rel is not None:
+        y += 26
+        cv2.putText(vis, "yaw_rel=%.0f" % yaw_rel, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 255), 2, cv2.LINE_AA)
+    if alerts:
+        y += 28
+        txt = " | ".join(alerts)
+        cv2.putText(vis, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
     return vis
 
 

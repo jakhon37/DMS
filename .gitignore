@@ -12,6 +12,9 @@ engines/*.build.log
 models/*/weights
 data/events.jsonl
 *.mp4
+configs/vehicle.yaml
+tests/replay/*.jpg
+tests/replay/*.avi
 !tests/replay/.gitkeep
 .idea/
 .vscode/

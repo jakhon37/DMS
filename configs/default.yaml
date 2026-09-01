@@ -34,7 +34,8 @@ models:
     classes: [cell phone]
     conf: 0.50
 state:
-  ear_closed: 0.21
+  ear_closed: 0.50
+  ear_open_median: 0.75
   mar_yawn: 0.65
   perclos_warn: 0.20
   perclos_crit: 0.40

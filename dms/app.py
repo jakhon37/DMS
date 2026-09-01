@@ -27,6 +27,8 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--detect", action="store_true", help="run SCRFD face detector")
     parser.add_argument("--save-preview", default="", help="write last annotated JPEG")
     parser.add_argument("--save-video", default="", help="write annotated MJPG avi")
+    parser.add_argument("--calibrate-forward", action="store_true", help="median pose/EAR -> configs/vehicle.yaml")
+    parser.add_argument("--events", default="", help="append AlertEvent JSONL")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -77,6 +79,7 @@ def main(argv: list | None = None) -> int:
         from dms.infer.landmarks import Landmark106
         from dms.infer.scrfd import ScrfdDetector
         from dms.runtime.trt_engine import TrtEngine
+        from dms.state.driver_state import DriverMonitor, angdiff
         from dms.track.driver_select import pick_driver
         from dms.track.iou_tracker import IouTracker
         from dms.viz.overlay import draw_faces
@@ -98,6 +101,9 @@ def main(argv: list | None = None) -> int:
     n_faces = 0
     infer_ms = []
     tracker = IouTracker() if args.detect else None
+    monitor = DriverMonitor(cfg) if args.detect else None
+    calib_yaw, calib_pitch, calib_ear = [], [], []
+    event_fh = open(args.events, "a") if args.events else None
     while not _STOP:
         frame = src.read(timeout_s=1.0)
         if frame is None:
@@ -133,6 +139,48 @@ def main(argv: list | None = None) -> int:
                     pose = solve_head_pose(lmk, (w, h))
             infer_ms.append((time.monotonic() - t1) * 1000.0)
             n_faces += len(faces)
+            t_s = frame.t_mono_ns / 1e9
+            present = driver_face is not None
+            yaw = pitch = None
+            if pose is not None:
+                yaw, pitch = pose[0], pose[1]
+            alert_names = []
+            yaw_rel = None
+            if monitor is not None:
+                evs = monitor.update(
+                    t_s,
+                    present=present,
+                    track_id=None if driver_track is None else driver_track.track_id,
+                    ear=ear,
+                    mar=mar,
+                    yaw=yaw,
+                    pitch=pitch,
+                )
+                for ev in evs:
+                    log.info("ALERT %s %s %s", ev.edge, ev.type.value, ev.severity.value)
+                    if event_fh is not None:
+                        import json
+
+                        event_fh.write(
+                            json.dumps(
+                                {
+                                    "t": ev.t_mono_s,
+                                    "type": ev.type.value,
+                                    "severity": ev.severity.value,
+                                    "edge": ev.edge,
+                                    "track_id": ev.track_id,
+                                    "extra": ev.extra,
+                                }
+                            )
+                            + "\n"
+                        )
+                alert_names = ["%s:%s" % (k.value, v.value) for k, v in monitor.active.items()]
+                if monitor.yaw_ewma is not None:
+                    yaw_rel = angdiff(monitor.yaw_ewma, cfg.forward_zero.yaw)
+            if args.calibrate_forward and present and yaw is not None and ear is not None:
+                calib_yaw.append(yaw)
+                calib_pitch.append(pitch if pitch is not None else 0.0)
+                calib_ear.append(ear)
             vis = draw_faces(
                 bgr,
                 faces,
@@ -142,6 +190,8 @@ def main(argv: list | None = None) -> int:
                 mar=mar,
                 pose=pose,
                 track_id=None if driver_track is None else driver_track.track_id,
+                alerts=alert_names,
+                yaw_rel=yaw_rel,
             )
             preview = vis
         if args.save_video:
@@ -187,6 +237,29 @@ def main(argv: list | None = None) -> int:
         os.makedirs(os.path.dirname(args.save_preview) or ".", exist_ok=True)
         cv2.imwrite(args.save_preview, preview)
         log.info("wrote preview %s", args.save_preview)
+    if event_fh is not None:
+        event_fh.close()
+    if args.calibrate_forward and calib_yaw:
+        import os
+
+        import yaml
+
+        def _med(xs):
+            s = sorted(xs)
+            return s[len(s) // 2]
+
+        veh = {
+            "forward_zero": {
+                "yaw": float(_med(calib_yaw)),
+                "pitch": float(_med(calib_pitch)),
+                "roll": 0.0,
+            },
+            "state": {"ear_open_median": float(_med(calib_ear))},
+        }
+        outp = os.path.join(os.path.dirname(os.path.abspath(args.config)), "vehicle.yaml")
+        with open(outp, "w") as f:
+            yaml.safe_dump(veh, f, sort_keys=False)
+        log.info("wrote %s n=%s zero=%s ear_open=%s", outp, len(calib_yaw), veh["forward_zero"], veh["state"])
     mean_ms = (sum(infer_ms) / len(infer_ms)) if infer_ms else 0.0
     log.info(
         "stopped frames=%s last_id=%s mean_infer_ms=%.1f total_face_hits=%s",

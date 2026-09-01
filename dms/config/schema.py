@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import List, Optional, Tuple
 
 import yaml
@@ -71,7 +72,8 @@ class ModelsConfig(BaseModel):
 
 
 class StateConfig(BaseModel):
-    ear_closed: float = 0.21
+    ear_closed: float = 0.50  # contour EAR (Soukupová 0.21); calibrate via vehicle.yaml
+    ear_open_median: float = 0.75
     mar_yawn: float = 0.65
     perclos_warn: float = 0.20
     perclos_crit: float = 0.40
@@ -147,7 +149,22 @@ class AppConfig(BaseModel):
     require_engines: bool = False
 
 
+def _merge(a: dict, b: dict) -> dict:
+    out = dict(a)
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def load_config(path: str) -> AppConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
+    veh = os.path.join(os.path.dirname(os.path.abspath(path)), "vehicle.yaml")
+    if os.path.isfile(veh):
+        with open(veh, "r") as f:
+            extra = yaml.safe_load(f) or {}
+        raw = _merge(raw, extra)
     return AppConfig.parse_obj(raw)
