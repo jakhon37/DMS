@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dms.geometry.face106 import LEFT_EYE_EAR, RIGHT_EYE_EAR
+from dms.geometry.face106 import LEFT_EYE, RIGHT_EYE
 
 
 def eye_aspect_ratio(eye6: np.ndarray) -> float:
@@ -18,7 +18,17 @@ def eye_aspect_ratio(eye6: np.ndarray) -> float:
     return float((v1 + v2) / (2.0 * h))
 
 
+def contour_ear(eye_pts: np.ndarray) -> float:
+    """Height/width of the eye point cloud. Stable when 6-pt order is unverified."""
+    w = float(eye_pts[:, 0].max() - eye_pts[:, 0].min())
+    h = float(eye_pts[:, 1].max() - eye_pts[:, 1].min())
+    if w < 1e-6:
+        return 0.0
+    return h / w
+
+
 def face_ear(landmarks106: np.ndarray) -> float:
-    left = eye_aspect_ratio(landmarks106[list(LEFT_EYE_EAR)])
-    right = eye_aspect_ratio(landmarks106[list(RIGHT_EYE_EAR)])
+    # UniFace 9/8-pt eye slices are not Soukupová-ordered; use contour EAR for v1.
+    left = contour_ear(landmarks106[list(LEFT_EYE)])
+    right = contour_ear(landmarks106[list(RIGHT_EYE)])
     return 0.5 * (left + right)

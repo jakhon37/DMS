@@ -37,9 +37,7 @@ def test_ear_open_vs_closed():
 
 def test_face_ear_uses_uniface_indices():
     lm = np.zeros((106, 2), dtype=np.float32)
-    for i, p in enumerate([[0, 0], [1, -2], [2, -2], [3, 0], [2, 2], [1, 2]]):
-        # map onto LEFT_EYE_EAR / RIGHT_EYE_EAR slots via face_ear internals
-        pass
-    lm[list((63, 64, 66, 67, 68, 70))] = [[0, 0], [1, -2], [2, -2], [3, 0], [2, 2], [1, 2]]
-    lm[list((76, 77, 79, 80, 81, 83))] = [[0, 0], [1, -2], [2, -2], [3, 0], [2, 2], [1, 2]]
+    # LEFT_EYE 63:72, RIGHT_EYE 76:84 — wide open boxes
+    lm[63:72] = [[0, 0], [1, -2], [2, -2], [3, 0], [2, 2], [1, 2], [0.5, 1], [2.5, 1], [1.5, 0]]
+    lm[76:84] = [[0, 0], [1, -2], [2, -2], [3, 0], [2, 2], [1, 2], [0.5, 1], [2.5, 1]]
     assert face_ear(lm) > 0.5

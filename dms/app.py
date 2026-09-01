@@ -65,17 +65,29 @@ def main(argv: list | None = None) -> int:
         return 0
 
     detector = None
+    landmarker = None
     writer = None
     preview = None
     if args.detect:
+        import os
+
+        from dms.geometry.ear import face_ear
+        from dms.geometry.mar import mouth_aspect_ratio
+        from dms.infer.landmarks import Landmark106
         from dms.infer.scrfd import ScrfdDetector
         from dms.runtime.trt_engine import TrtEngine
+        from dms.track.driver_select import pick_driver
         from dms.viz.overlay import draw_faces
 
-        eng_path = cfg.models.face.engine
-        log.info("loading detector %s", eng_path)
-        engine = TrtEngine(eng_path)
-        detector = ScrfdDetector(engine, conf=cfg.models.face.conf, iou=cfg.models.face.iou)
+        log.info("loading detector %s", cfg.models.face.engine)
+        face_engine = TrtEngine(cfg.models.face.engine)
+        detector = ScrfdDetector(face_engine, conf=cfg.models.face.conf, iou=cfg.models.face.iou)
+        if os.path.isfile(cfg.models.landmarks.engine):
+            log.info("loading landmarks %s", cfg.models.landmarks.engine)
+            lmk_engine = TrtEngine(cfg.models.landmarks.engine)
+            landmarker = Landmark106(lmk_engine)
+        else:
+            log.warning("landmarks engine missing: %s", cfg.models.landmarks.engine)
 
     sd_notify("READY=1")
     t0 = time.monotonic()
@@ -93,12 +105,22 @@ def main(argv: list | None = None) -> int:
         last_id = frame.frame_id
         bgr = frame.full_bgra[..., :3]
         vis = bgr
+        faces = []
+        ear = mar = None
         if detector is not None:
             t1 = time.monotonic()
             faces = detector.detect(bgr)
+            h, w = bgr.shape[:2]
+            driver = pick_driver(faces, cfg.driver_roi, (w, h))
+            lmk = None
+            if landmarker is not None and driver is not None:
+                lmk = landmarker.infer_one(bgr, driver.xyxy)
+                if lmk is not None:
+                    ear = face_ear(lmk)
+                    mar = mouth_aspect_ratio(lmk)
             infer_ms.append((time.monotonic() - t1) * 1000.0)
             n_faces += len(faces)
-            vis = draw_faces(bgr, faces)
+            vis = draw_faces(bgr, faces, driver=driver, landmarks106=lmk, ear=ear, mar=mar)
             preview = vis
         if args.save_video:
             if writer is None:
@@ -121,11 +143,13 @@ def main(argv: list | None = None) -> int:
                 xs = sorted(infer_ms)
                 p95 = xs[min(len(xs) - 1, int(0.95 * (len(xs) - 1)))]
             log.info(
-                "frames=%s fps=%.1f infer_p95_ms=%.1f faces_last=%s",
+                "frames=%s fps=%.1f infer_p95_ms=%.1f faces_last=%s ear=%s mar=%s",
                 n,
                 fps,
                 p95,
-                n_faces if detector is None else len(faces),
+                len(faces),
+                None if ear is None else round(ear, 3),
+                None if mar is None else round(mar, 3),
             )
         sd_notify("WATCHDOG=1")
         if args.max_frames and n >= args.max_frames:
