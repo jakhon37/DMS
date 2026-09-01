@@ -4,7 +4,7 @@
 | --- | --- |
 | **Title** | Xavier NX In-Cabin Driver Monitoring System — Production Architecture |
 | **Author** | TBD |
-| **Date** | 2026-09-01 (rev 3) |
+| **Date** | 2026-09-01 (rev 4) |
 | **Status** | Draft |
 | **Target hardware** | NVIDIA Jetson Xavier NX Developer Kit (`nvidia,p3449-0000+p3668-0001` / `tegra194`) |
 | **Software baseline** | L4T R35.6.5 / JetPack 5.1.6-b5 / TensorRT 8.5.2.2 / CUDA 11.4.19 / Python 3.8.10 |
@@ -123,7 +123,7 @@ There is no tracker, no temporal fusion, no config schema, no tests, no logging,
 | K1 | **Custom Python 3.8 + TensorRT 8.5 + GStreamer NVMM**, not DeepStream 6.3 | DeepStream is not installed; `nvinfer` is absent. DMS value is temporal state, not detect-and-overlay. Installing DS 6.3 is an optional later path, not v1. |
 | K2 | **Runtime = TensorRT engines only.** No TF, Torch, ORT, DeepFace on device | Those packages are missing; they also explode RAM. Training/export is off-box. |
 | K3 | **One TRT wrapper**: prefer **`cuda-python`**, **ctypes `libcudart.so` fallback**. Async `submit`/`wait_all` in PR-03; blocking `infer()` is a convenience wrapper | `pycuda` is not installed. `cuda-python` aarch64/cp38 wheels are **unproven on this board** — PR-03 must prove install before writing the wrapper. Do not build-from-source on the NX. |
-| K4 | **Capture 1280×720**, detector letterbox 640×640 pad **114** in the inference thread. **v1 = ≥15 FPS p95 at 20 W 6-core sequential.** 30 FPS is stretch only after measured async overlap | 1080p is affordable in RAM but costs ISP/DRAM bandwidth. Dual GST appsinks are forbidden (frame pairing). |
+| K4 | **Capture / appsink is 1280×720.** Detector letterbox 640×640 pad **114** in the inference thread. **v1 = ≥15 FPS p95 at 20 W 6-core sequential.** 30 FPS is stretch only after measured async overlap | 1080p **appsink** is not v1 (ISP/DRAM). Open question 7 is about the *camera module native mode*, not this size: a 1080p-only sensor is VIC-downscaled to 720p before appsink. Dual GST appsinks are forbidden (frame pairing). |
 | K5 | **Face: YOLOv8n-face (derronqi) 640×640 FP16 on GPU.** Decode is `1×20×8400`, **not** `1×N×5`. **SCRFD-500m is v1.1** (different heads/decoder), not a one-line config switch | Repo already pointed at `yolov8n-face.onnx`. NMS/decode stay off DLA. Do not salvage `yolov8.py` `process_output`. |
 | K6 | **Landmarks: InsightFace `2d106det` 192×192 FP16, 1.5× loose-crop affine.** **Device = GPU unless DLA0 audit passes** (PReLU typically GPU-fallbacks on TRT 8.5 DLA) | 5-point is too sparse for EAR **and yawn**. ADNet 256 / 1k3d68 heavier. 106-pt has eyelid contours + mouth, **not irises**. |
 | K7 | **v1 head pose = PnP from 106 landmarks.** Do **not** ship RepVGG-B1g2. 6DRepNet-A0 is **v1.1** only with a named, hashed, licensed checkpoint — renaming `backbone_name` does **not** yield a trained A0 | Official 6DRepNet and this repo’s export scripts are B1g2. B1g2 weights are not loadable into A0. Untrained A0 is useless. |
@@ -177,7 +177,8 @@ dms/                          # installable package (Python 3.8)
   viz/
     overlay.py                # debug only
 configs/
-  default.yaml
+  default.yaml                # lab: source.type file, source.dev true
+  production.yaml             # vehicle: source.type csi, source.dev false (installed to /etc/dms)
   schema.md                   # generated from pydantic
 engines/                      # git-lfs or GitHub Release artifacts, not git blobs
   *.engine
@@ -196,6 +197,7 @@ tools/
   export/README.md            # off-box ONNX export recipes (x86, not this NX)
 tests/
   unit/                       # geometry + state machine
+  test_no_mp.py               # R15: no multiprocessing under dms/
   replay/                     # fixtures (one indoor clip, one night clip)
 ```
 
@@ -375,6 +377,13 @@ gst-launch-1.0 -e videotestsrc num-buffers=30 !
 ```
 
 **Camera-lost handling:** GST bus thread watches `ERROR` / `EOS`. On error: push a sentinel `Frame(ok=False)`, retry pipeline start with exponential backoff (0.5 s, 1 s, 2 s, 5 s, 5 s). After 5 failures, `Health.camera = failed`. Default `camera.fail_fatal: false`. systemd still gets `READY=1` (see Service) so a missing camera does not hit `TimeoutStartSec`. Replay (`source.type: file`) with a missing file **is** fatal (exit 2) — that is a config error, not a camera blip.
+
+**File-source footgun (R13):** do **not** refuse `READY=1` for `source.type: file` — that is the lab/replay path and the anti-restart-loop default. Do make it loud:
+
+- Once at startup (not per frame), log **WARNING** `SOURCE_FILE` if `source.type` is `file` or `test` **and** `source.dev` is not `true`.
+- Always set `Health.source` to the enum value and `Health.dev_replay` true for file/test.
+- `configs/default.yaml` (repo/lab) has `source.dev: true`. `setup_jetson.sh` installs `/etc/dms/default.yaml` from `configs/production.yaml` with `source.dev: false` and `source.type: csi` (operator must confirm). Under systemd (`NOTIFY_SOCKET` set) a file/test source with `dev: false` is the vehicle-misconfig case — still READY, still warning + health flag, never a restart loop.
+- A path under `tests/` is **not** sufficient to suppress the warning (the lab default path is `tests/replay/...`; that would hide a shipped-to-vehicle default.yaml).
 
 ### TensorRT runtime (one module)
 
@@ -927,13 +936,14 @@ EWMA: `y := αx + (1-α)y` with `α = 0.30` for EAR/MAR, `α = 0.20` for pose (n
 
 ```yaml
 source:
-  type: file                    # csi | usb | file | test  (file until a camera exists)
+  type: file                    # csi | usb | file | test  (lab default; production.yaml uses csi)
   path: tests/replay/day_driver.mp4
+  dev: true                     # lab/replay; false in /etc/dms (WARNING if file/test without this)
   device: /dev/video0
   sensor_id: 0
   width: 1280
   height: 720
-  fps: 30                       # capture; processing may be lower
+  fps: 30                       # capture; processing may be lower. Appsink is always 720p (K4).
 capture:
   full_size: [1280, 720]        # appsink size; letterbox 640 is inference-side
   letterbox: [640, 640]
@@ -1041,7 +1051,7 @@ WantedBy=multi-user.target
 
 `sd_notify` without `python-systemd`: a 30-line helper (`dms/io/sd_notify.py`) writes datagrams to `$NOTIFY_SOCKET` with `socket.AF_UNIX` + `SOCK_DGRAM`. **`sd_notify` is not in `libc`** (`ctypes.CDLL("libc.so.6").sd_notify` is wrong; the symbol lives in `libsystemd`). Do not dlopen libsystemd either — the socket helper is enough. If `NOTIFY_SOCKET` is unset (dev/`python -m dms.app`), no-op.
 
-- `READY=1` after config validates **and engines deserialize**, even if the camera pipeline failed and `camera.fail_fatal=false`. This avoids systemd killing the unit at the default start timeout when no CSI camera is attached.
+- `READY=1` after config validates **and engines deserialize**, even if the camera pipeline failed and `camera.fail_fatal=false`. This avoids systemd killing the unit at the default start timeout when no CSI camera is attached. File/test source also READY (do not restart-loop); emit the one-shot `SOURCE_FILE` warning instead.
 - `WATCHDOG=1` every 5 s from the inference thread if `frame_id` advanced **or** `Health.camera=failed` and we are in the non-fatal retry loop (still alive).
 - `MAINPID=` not required.
 
@@ -1056,6 +1066,8 @@ install -d -o dms -g dms /opt/dms /var/lib/dms /etc/dms
 # venv ...
 # ABI go/no-go (must not throw):
 python -c "import numpy, cv2, tensorrt; a=numpy.zeros((8,8,3), numpy.uint8); cv2.cvtColor(a, cv2.COLOR_BGR2RGB); print('numpy', numpy.__version__, 'cv2', cv2.__version__, 'trt', tensorrt.__version__)"
+install -m 0644 configs/production.yaml /etc/dms/default.yaml   # source.type: csi, source.dev: false
+echo "EDIT /etc/dms/default.yaml source.type before a vehicle boot (csi|usb). file+dev:false logs SOURCE_FILE."
 # power — printed, applied only with --apply-power
 echo "sudo nvpmodel -m 8   # MODE_20W_6CORE"
 echo "sudo jetson_clocks   # OPTIONAL, thermal risk"
@@ -1094,6 +1106,8 @@ There is no external HTTP API beyond localhost health. The “API” is the data
 {
   "ok": true,
   "camera": "ok",
+  "source": "file",
+  "dev_replay": true,
   "engines": {"face": "gpu", "landmarks": "gpu", "pose": "pnp", "objects": "gpu"},
   "fps": 16.2,
   "latency_ms": {"det_p95": 14.1, "e2e_p95": 41.0},
@@ -1104,6 +1118,8 @@ There is no external HTTP API beyond localhost health. The “API” is the data
   "frame_id": 18420
 }
 ```
+
+`source` is the live `SourceType`. `dev_replay` is true for file/test. `ok` stays true for a healthy replay (do not fail health just because the source is a file). Operators grep journald for `SOURCE_FILE` or read this field.
 
 `/metrics` (Prometheus text) exposes histograms: `dms_stage_latency_ms{stage="yolo|lmk|pose|obj|e2e"}`.
 
@@ -1308,7 +1324,7 @@ No TLS needed for localhost health. If CAN is added later, it is a trusted in-ve
 
 ## Observability
 
-**Logs:** structured JSON to stdout (journald) via stdlib `logging` + a one-file `JsonFormatter`. Fields: `ts, level, component, frame_id, msg, ...`. **No `print` in the hot path** (retire the prints in [`yolov8.py`](/home/nvidia/myspace/DMS/models/face_detect/models/yolov8.py)).
+**Logs:** structured JSON to stdout (journald) via stdlib `logging` + a one-file `JsonFormatter`. Fields: `ts, level, component, frame_id, msg, ...`. **No `print` in the hot path** (retire the prints in [`yolov8.py`](/home/nvidia/myspace/DMS/models/face_detect/models/yolov8.py)). One-shot `WARNING` `SOURCE_FILE` at process start when `source.type` is `file`/`test` and `source.dev` is not true (R13); never per-frame.
 
 **Metrics (1 Hz + histograms):**
 
@@ -1352,6 +1368,7 @@ This is a vehicle ECU-style service, not a web app. Rollout is **software stages
 | Unit | EAR, MAR, PnP sign, EWMA, hysteresis enter/exit, cooldown, PERCLOS window | `pytest` on CPU, no TRT |
 | Tracker | ID stability on a synthetic overlapping-box sequence | pytest |
 | Config | pydantic reject unknown keys, missing engine path | pytest |
+| Lint/CI | R12 allowlist; R15 no `multiprocessing` / `ProcessPoolExecutor` under `dms/` (see PR-01) | pytest or a 20-line grep in `tests/test_no_mp.py` |
 | Replay | `scripts/replay.py tests/replay/*.mp4` produces JSONL; golden alert counts with ±tolerance | pytest + engines |
 | Latency | replay 300 frames, write `latency_budget.json`, fail CI if e2e p95 > 66 ms **on this device** | manual/nightly, not x86 CI |
 | Soak | 8 h videotestsrc or looped file, RSS < 5.0 GB, no watchdog fire | lab |
@@ -1418,9 +1435,9 @@ Replay **must** work with zero cameras — it is the default `source.type`.
 | R10 | **Memory over 5 GB** if someone adds B1g2, DeepFace, or 60 s raw frames | High | Memory budget table in CI soak; refuse to load unknown engines over 80 MB without a YAML ack |
 | R11 | **False criticals** (EAR at night, pose at extreme yaw) | High | `unreliable` flags; hysteresis; night conf drop; do not ship cigarette until trained |
 | R12 | **pycuda/ORT accidentally added to requirements** | Medium | requirements allowlist; CI grep |
-| R13 | **systemd restart loop** on missing camera | Medium | `source.type: file` default in shipped YAML until camera is configured; `camera.fail_fatal: false` |
+| R13 | **systemd restart loop** on missing camera **vs** silent file-replay on a vehicle | Medium | `camera.fail_fatal: false` + READY on camera fail. Lab YAML is `source.type: file` + `source.dev: true`. Production install is `configs/production.yaml` (`csi`, `dev: false`). File/test without `dev: true` → one-shot `SOURCE_FILE` WARNING + `Health.source` / `dev_replay`; **do not** refuse READY |
 | R14 | **nvcc not on PATH** | Low | Runtime does not compile CUDA; `trtexec` does not need nvcc. Document `export PATH=/usr/local/cuda-11.4/bin:$PATH` only for future custom preprocess kernels |
-| R15 | **Dual process / multiprocessing CUDA** | Medium | Forbidden in v1; single process |
+| R15 | **Dual process / multiprocessing CUDA** | Medium | Forbidden in v1; single process. **CI grep** (PR-01): fail if `dms/` imports `multiprocessing`, `multiprocess`, `torch.multiprocessing`, or `concurrent.futures.ProcessPoolExecutor`. Do **not** ban `subprocess` — tegrastats, ffmpeg concat, and `gst-launch` smokes are allowed in `dms/io/`, `deploy/`, `scripts/` |
 
 ---
 
@@ -1434,7 +1451,7 @@ Product questions — **not silently decided**. Recommended default in parenthes
 4. **Driver identification / fleet cloud in scope?** **Recommend: no.** That would bring ArcFace/ResNet100 back, plus privacy/legal. The tracker is anonymous `track_id`.
 5. **OMS (all seats) vs driver-only?** **Recommend: driver-only.** Occupant monitoring wants a second camera and DeepStream/nvstreammux; out of v1.
 6. **Display UI vs headless production image?** **Recommend: headless.** Optional OpenCV window or EGL overlay behind `display.enabled` for lab.
-7. **Target FPS / resolution if a camera is already on order?** **Recommend: 1280×720 @ 15 FPS contract at 20 W 6-core.** 30 FPS is stretch after measured overlap, not a v1 promise. If the camera is 1080p-only, VIC downscale to 720p for inference.
+7. **Target FPS / resolution if a camera is already on order?** Does **not** reopen K4. **Recommend: 1280×720 @ 15 FPS contract at 20 W 6-core** (appsink and inference size stay 720p). 30 FPS is stretch after measured overlap, not a v1 promise. If the *module* is 1080p-only, VIC downscales to 720p **before** appsink; a 1080p appsink is still not v1.
 8. **LHD vs RHD seat ROI?** Default LHD `[0.0, 0.0, 0.65, 1.0]`. Confirm market.
 9. **Cigarette required in v1?** **Recommend: no** (no COCO class, no weights). Phone yes.
 10. **Who owns off-box ONNX export and licenses?** v1 needs derronqi yolov8n-face (likely AGPL) + InsightFace `2d106det` from `buffalo_l` + Ultralytics yolov8n (AGPL). 6DRepNet-A0 is v1.1. `scripts/fetch_onnx.sh` must write SHA256+license; PRs 04/06/09 cannot merge without hashes. Confirm AGPL is acceptable.
@@ -1480,9 +1497,9 @@ Legend: **P** = can start in parallel after its listed deps.
 ### PR-01 — Repo hygiene + Python 3.8 venv + config schema
 
 - **Title:** `chore: replace template with installable dms package and validated YAML config`
-- **Files/components:** new `dms/` package skeleton; `configs/default.yaml`; `dms/config/schema.py` (pydantic v1); `requirements.txt` (numpy 1.23.5, pydantic, PyYAML, pytest — **not** jetson-stats, **not** opencv-python); `.gitignore`; delete `req.txt`, [`utils/video_stream.py`](/home/nvidia/myspace/DMS/utils/video_stream.py), [`utils/image_processing.py`](/home/nvidia/myspace/DMS/utils/image_processing.py); expand gitignore; rewrite `readme.md`.
+- **Files/components:** new `dms/` package skeleton; `configs/default.yaml` (lab, `source.dev: true`); `configs/production.yaml` (csi, `dev: false`); `dms/config/schema.py` (pydantic v1); `requirements.txt` (numpy 1.23.5, pydantic, PyYAML, pytest — **not** jetson-stats, **not** opencv-python); `tests/test_no_mp.py` (R15); `.gitignore`; delete `req.txt`, [`utils/video_stream.py`](/home/nvidia/myspace/DMS/utils/video_stream.py), [`utils/image_processing.py`](/home/nvidia/myspace/DMS/utils/image_processing.py); expand gitignore; rewrite `readme.md`.
 - **Depends on:** none
-- **Description:** `python -m dms.app --help`. YAML validate, JSON logs, exit 2 on bad config. **Go/no-go:** `cv2.cvtColor` on a numpy 1.23 `uint8` array must succeed in the venv (R7 ABI). Also `import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst`.
+- **Description:** `python -m dms.app --help`. YAML validate, JSON logs, exit 2 on bad config. **Go/no-go:** `cv2.cvtColor` on a numpy 1.23 `uint8` array must succeed in the venv (R7 ABI). Also `import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst`. **R15 CI:** `tests/test_no_mp.py` AST/grep-fails `multiprocessing`, `multiprocess`, `torch.multiprocessing`, `ProcessPoolExecutor` anywhere under `dms/`. `subprocess` is allowlisted in `dms/io/`, `deploy/`, `scripts/` only.
 
 ### PR-02 — GStreamer NVMM capture + file replay
 
@@ -1561,14 +1578,21 @@ Legend: **P** = can start in parallel after its listed deps.
 - **Title:** `feat: health endpoint, GPIO buzzer, systemd watchdog service`
 - **Files/components:** `dms/io/health.py` (stdlib `http.server`), `dms/io/sd_notify.py`, `dms/io/gpio_alert.py`; `deploy/dms.service` (`TimeoutStartSec=90`, `SupplementaryGroups`, `StateDirectory`); `deploy/setup_jetson.sh` (`useradd`, groups, dirs, ABI check, `--apply-power` guard); logrotate; **system** jetson-stats 7.2.1 / tegrastats.
 - **Depends on:** PR-08
-- **Description:** `READY=1` after engines load even if camera failed-non-fatal. Thermal degrade hook. If PR-08.5 not landed, include `calibrate_forward.py` here.
+- **Description:** `READY=1` after engines load even if camera failed-non-fatal. One-shot `SOURCE_FILE` warning + `Health.source` / `dev_replay`. `setup_jetson.sh` installs `configs/production.yaml` to `/etc/dms/default.yaml`. Thermal degrade hook. If PR-08.5 not landed, include `calibrate_forward.py` here.
 
-### PR-12 — Tests, soak, delete remaining template, replay CI on NX
+### PR-11.5 — Delete leftover prototype trees
 
-- **Title:** `test: replay golden tests, 8h soak, remove leftover prototype code`
-- **Files/components:** `tests/`; delete leftover `models/face_detect/`, `models/face_allignment/`, `models/headpose/` runtime copies (keep `tools/export/`); latency_budget checker; memory RSS assert.
-- **Depends on:** PR-10, PR-11, PR-07, PR-09
-- **Description:** v1 freeze. Replay without a camera. Peak RSS < 5.0 GB and e2e p95 ≤ 66 ms on this Xavier NX at 20 W 6-core.
+- **Title:** `chore: remove leftover models/face_detect, face_allignment, headpose after salvage`
+- **Files/components:** delete remaining `models/face_detect/`, `models/face_allignment/`, `models/headpose/` runtime copies (keep `tools/export/`). No behavior change.
+- **Depends on:** PR-03, PR-07 (NMS/TRT/landmarks/pose salvage already landed; PR-07 implies PR-04/06)
+- **Description:** Isolated deletion so a failed v1 freeze is about soak/metrics, not a merge conflict in dead code. Can run ∥ PR-08…11 after PR-07.
+
+### PR-12 — Replay golden tests + 8h soak (v1 freeze)
+
+- **Title:** `test: replay golden tests, 8h soak, RSS and latency gates on NX`
+- **Files/components:** `tests/`; latency_budget checker; memory RSS assert. **No** leftover-dir deletion (that is PR-11.5).
+- **Depends on:** PR-10, PR-11, PR-11.5, PR-07, PR-09
+- **Description:** v1 freeze only. Replay without a camera. Peak RSS < 5.0 GB and e2e p95 ≤ 66 ms on this Xavier NX at 20 W 6-core.
 
 ### Parallelism map
 
@@ -1587,6 +1611,7 @@ flowchart TD
   P09[PR-09 objects]
   P10[PR-10 JSONL clips]
   P11[PR-11 systemd health]
+  P115[PR-11.5 delete leftover]
   P12[PR-12 tests freeze]
   P00 --> P04
   P00 --> P06
@@ -1607,13 +1632,16 @@ flowchart TD
   P08 --> P10
   P08 --> P11
   P085 --> P11
+  P03 --> P115
+  P07 --> P115
+  P115 --> P12
   P09 --> P12
   P07 --> P12
   P10 --> P12
   P11 --> P12
 ```
 
-PRs that can be parallel after their deps: **PR-00 ∥ PR-01**; **PR-02 ∥ PR-03**; **PR-09 ∥ PR-04/05/06**; **PR-10 ∥ PR-11** after PR-08.
+PRs that can be parallel after their deps: **PR-00 ∥ PR-01**; **PR-02 ∥ PR-03**; **PR-09 ∥ PR-04/05/06**; **PR-10 ∥ PR-11** after PR-08; **PR-11.5 ∥ PR-08…11** after PR-07.
 
 ---
 
