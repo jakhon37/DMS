@@ -1,0 +1,78 @@
+source:
+  type: file
+  path: tests/replay/day_driver.mp4
+  dev: true
+  device: /dev/video0
+  sensor_id: 0
+  width: 1280
+  height: 720
+  fps: 30
+capture:
+  full_size: [1280, 720]
+  letterbox: [640, 640]
+  letterbox_pad_value: 0
+  queue_depth: 1
+camera:
+  fail_fatal: false
+models:
+  face:
+    engine: engines/scrfd_500m_640_fp16_gpu.engine
+    conf: 0.5
+    iou: 0.4
+    device: gpu
+  landmarks:
+    engine: engines/2d106det_192_fp16_gpu.engine
+    device: gpu
+    dla_engine: engines/2d106det_192_fp16_dla0.engine
+  pose:
+    mode: pnp
+  objects:
+    enabled: false
+    engine: engines/yolov8n_320_fp16_gpu.engine
+    every_n: 2
+    roi: [0.0, 0.45, 1.0, 1.0]
+    classes: [cell phone]
+    conf: 0.50
+state:
+  ear_closed: 0.21
+  mar_yawn: 0.65
+  perclos_warn: 0.20
+  perclos_crit: 0.40
+  microsleep_s: 1.5
+  gaze_yaw_deg: 25.0
+  gaze_pitch_deg: 20.0
+  gaze_warn_s: 2.0
+  gaze_crit_s: 4.0
+  face_lost_s: 1.0
+  assume_moving: true
+alerts:
+  gpio_pin: null
+  buzzer: false
+  mute_when_parked: false
+clips:
+  enabled: false
+  dir: /var/lib/dms/clips
+  pre_s: 10
+  post_s: 5
+  quota_mb: 2048
+  retain_h: 24
+  ffmpeg: /usr/bin/ffmpeg
+display:
+  enabled: false
+privacy:
+  record_faces: false
+  telemetry: false
+health:
+  bind: 127.0.0.1
+  port: 8088
+  watchdog_s: 30
+power:
+  nvpmodel: 8
+  jetson_clocks: false
+driver_roi: [0.0, 0.0, 0.65, 1.0]
+forward_zero:
+  yaw: 0.0
+  pitch: 0.0
+  roll: 0.0
+seat: lhd
+require_engines: false

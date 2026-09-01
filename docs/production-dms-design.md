@@ -4,7 +4,7 @@
 | --- | --- |
 | **Title** | Xavier NX In-Cabin Driver Monitoring System — Production Architecture |
 | **Author** | TBD |
-| **Date** | 2026-09-01 (rev 4) |
+| **Date** | 2026-09-01 (rev 5) |
 | **Status** | Draft |
 | **Target hardware** | NVIDIA Jetson Xavier NX Developer Kit (`nvidia,p3449-0000+p3668-0001` / `tegra194`) |
 | **Software baseline** | L4T R35.6.5 / JetPack 5.1.6-b5 / TensorRT 8.5.2.2 / CUDA 11.4.19 / Python 3.8.10 |
@@ -111,6 +111,7 @@ There is no tracker, no temporal fusion, no config schema, no tests, no logging,
 - Training or ONNX export **on the Jetson**. Export happens on an x86/CUDA workstation; this board only builds TRT engines from ONNX (one-shot) and runs them.
 - DeepStream as the default runtime.
 - Haar cascades, TensorFlow/Keras runtime, PyTorch runtime, ONNX Runtime at runtime.
+- **`pip install uniface`** (or `opencv-python`) on the NX. UniFace is MIT and useful, but `requires-python >=3.10`, depends on ORT + pip OpenCV, and pulls identity/attribute models. Use it **off-box** as a hashed ONNX + index cookbook only.
 - JetPack 6 / Python 3.10 / OpenCV CUDA rebuild.
 - UNECE R171 / Euro NCAP / GB/T **certification**. Schema should not paint us into a corner, but v1 is a research/engineering prototype unless the user says otherwise (open question).
 
@@ -123,9 +124,9 @@ There is no tracker, no temporal fusion, no config schema, no tests, no logging,
 | K1 | **Custom Python 3.8 + TensorRT 8.5 + GStreamer NVMM**, not DeepStream 6.3 | DeepStream is not installed; `nvinfer` is absent. DMS value is temporal state, not detect-and-overlay. Installing DS 6.3 is an optional later path, not v1. |
 | K2 | **Runtime = TensorRT engines only.** No TF, Torch, ORT, DeepFace on device | Those packages are missing; they also explode RAM. Training/export is off-box. |
 | K3 | **One TRT wrapper**: prefer **`cuda-python`**, **ctypes `libcudart.so` fallback**. Async `submit`/`wait_all` in PR-03; blocking `infer()` is a convenience wrapper | `pycuda` is not installed. `cuda-python` aarch64/cp38 wheels are **unproven on this board** — PR-03 must prove install before writing the wrapper. Do not build-from-source on the NX. |
-| K4 | **Capture / appsink is 1280×720.** Detector letterbox 640×640 pad **114** in the inference thread. **v1 = ≥15 FPS p95 at 20 W 6-core sequential.** 30 FPS is stretch only after measured async overlap | 1080p **appsink** is not v1 (ISP/DRAM). Open question 7 is about the *camera module native mode*, not this size: a 1080p-only sensor is VIC-downscaled to 720p before appsink. Dual GST appsinks are forbidden (frame pairing). |
-| K5 | **Face: YOLOv8n-face (derronqi) 640×640 FP16 on GPU.** Decode is `1×20×8400`, **not** `1×N×5`. **SCRFD-500m is v1.1** (different heads/decoder), not a one-line config switch | Repo already pointed at `yolov8n-face.onnx`. NMS/decode stay off DLA. Do not salvage `yolov8.py` `process_output`. |
-| K6 | **Landmarks: InsightFace `2d106det` 192×192 FP16, 1.5× loose-crop affine.** **Device = GPU unless DLA0 audit passes** (PReLU typically GPU-fallbacks on TRT 8.5 DLA) | 5-point is too sparse for EAR **and yawn**. ADNet 256 / 1k3d68 heavier. 106-pt has eyelid contours + mouth, **not irises**. |
+| K4 | **Capture / appsink is 1280×720.** Detector resize to 640×640 is **in the inference thread** (SCRFD UniFace `resize_image`, not YOLO pad-114). **v1 = ≥15 FPS p95 at 20 W 6-core sequential.** 30 FPS is stretch only after measured async overlap | 1080p **appsink** is not v1 (ISP/DRAM). Open question 7 is about the *camera module native mode*, not this size: a 1080p-only sensor is VIC-downscaled to 720p before appsink. Dual GST appsinks are forbidden (frame pairing). |
+| K5 | **Face: SCRFD-500m-kps 640×640 FP16 on GPU** (UniFace-pinned ONNX). Decode is InsightFace 3-stride (8/16/32) scores+bbox+kps, **not** YOLOv8 `1×20×8400`. YOLOv8-face is a **GPL-3.0** fallback, not v1 | UniFace lists SCRFD as MIT and publishes URL+SHA256. Derronqi/Ultralytics YOLO-face is AGPL/GPL (OQ-10). NMS/decode stay off DLA. Do not salvage `yolov8.py` `process_output`. |
+| K6 | **Landmarks: InsightFace `2d106det` 192×192 FP16, 1.5× loose-crop affine.** **Index table = UniFace Landmark106** (not JD-106). **Device = GPU unless DLA0 audit passes** | UniFace ships the same ONNX with a documented topology. 5-point is too sparse for yawn. 106-pt has lids + mouth, **not irises**. |
 | K7 | **v1 head pose = PnP from 106 landmarks.** Do **not** ship RepVGG-B1g2. 6DRepNet-A0 is **v1.1** only with a named, hashed, licensed checkpoint — renaming `backbone_name` does **not** yield a trained A0 | Official 6DRepNet and this repo’s export scripts are B1g2. B1g2 weights are not loadable into A0. Untrained A0 is useless. |
 | K8 | **Gaze v1 = PnP/head pose + eyelid-center** (mean of the 8 lid points per eye). Dedicated gaze net is v1.5+ | 2d106det has **no irises**. MediaPipe 478 does; we are not using it. |
 | K9 | **Objects: YOLOv8n 320×320 FP16 on GPU, every Nth frame, on a configured lap/cabin ROI.** **Drop Cap.** Phone from COCO in v1; cigarette is v1.1 (custom 2-class) | Cap has no safety action. Never run object detect inside the face loop ([`main.py` L38–39](/home/nvidia/myspace/DMS/main.py)). |
@@ -135,7 +136,8 @@ There is no tracker, no temporal fusion, no config schema, no tests, no logging,
 | K13 | **FP16 v1, static shapes, batch=1.** `--memPoolSize=workspace:512M` is a **build-time** cap only. Runtime contexts allocate activations + a few pinned buffers (tens of MB), **not** 512 MB `cudaMalloc` per engine | The 1 MiB workspace in `onnx2trt.py` is a bug. Do not confuse builder pool with runtime RSS. |
 | K14 | **venv `--system-site-packages`** for `cv2` (GStreamer) and `tensorrt`; pin numpy 1.23.5 in venv; never `pip install opencv-python` or `tensorflow` | System numpy 1.17.4 cannot host a modern stack; pip OpenCV would **drop** GStreamer and still have no CUDA. |
 | K15 | **Headless default**; optional debug overlay behind `dms.display.enabled` | Production image should not require a desktop. Idle RAM is already 2.6 GB with GUI. |
-| K16 | **Local-only privacy**: no race/emotion, no embeddings uploaded, clips off by default, 2 GB / 24 h quota when enabled | In-cabin video is biometric-adjacent. |
+| K16 | **Local-only privacy**: no race/emotion, no embeddings uploaded, clips off by default, 2 GB / 24 h quota when enabled | In-cabin video is biometric-adjacent. UniFace attribute/recognition heads stay unused. |
+| K17 | **UniFace is a cookbook, never a runtime.** Pin its ONNX URLs/SHA256 in PR-00. Copy crop + 106 indices + PnP point ids. Do not import `uniface`, FairFace, ArcFace, or FaceAnalyzer on the NX | Python ≥3.10, ORT, pip OpenCV, embeddings-by-default — all violate K2/K14/K16. |
 
 ---
 
@@ -497,14 +499,13 @@ flowchart TB
 
 ### Model choices vs repo experiments
 
-**Face — YOLOv8n-face (derronqi), keep the repo’s direction, fix decode.**
+**Face — SCRFD-500m-kps (UniFace cookbook), not YOLOv8-face.**
 
-- [`test.py`](/home/nvidia/myspace/DMS/models/face_detect/test.py) expected `weights/yolov8n-face.onnx`.
-- **Not** `1×N×5`. derronqi/yolov8-face is 1 class + 5 kpts. Common ONNX layout at 640: **`output0` = `1×20×8400`** (4 box + 1 obj + 15 kpt). [`yolov8.py`](/home/nvidia/myspace/DMS/models/face_detect/models/yolov8.py) `process_output` treating `predictions[:, 4:]` as class scores is **wrong** for this head — do not port it.
-- Input **640×640**, not `[480,640]` in [`pt2onnx.py`](/home/nvidia/myspace/DMS/models/face_detect/pt2onnx.py).
-- Conf **0.45**, IoU **0.45** (the 0.999xx values in `test.py` detect nothing).
-- 5 kpts are a bonus for a sanity check against 106; they do **not** replace 106-pt (no mouth, weak EAR).
-- **SCRFD-500m is v1.1**, not a config enum in v1. It has 3-stride score/bbox/kps heads and a different decoder. If YOLO-face p95 > 18 ms in PR-04, file an issue and schedule a SCRFD PR — do not “flip a name.” YuNet (OpenCV Zoo) is a CPU-only lab toy, not a production detector here.
+- Pin UniFace `SCRFDWeights.SCRFD_500M_KPS`: `https://github.com/yakhyo/uniface/releases/download/weights/scrfd_500m_kps.onnx` SHA256 `5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a` (MIT per UniFace attribution).
+- Decode (PR-04): 3 FPN strides `{8,16,32}`, 2 anchors, outputs = scores / bbox / kps per stride (9 tensors). Preprocess: BGR→float, `(x-127.5)/127.5`, CHW. Resize keeps aspect then pad (UniFace `resize_image`), **not** Ultralytics pad-114.
+- Conf **0.5**, NMS IoU **0.4** (UniFace defaults). 5 kpts are a bonus; they do **not** replace 106-pt.
+- YOLOv8-face (derronqi / UniFace `yolov8n-face.onnx`) is **GPL-3.0** — keep as a documented fallback, not v1. Do not salvage [`yolov8.py`](/home/nvidia/myspace/DMS/models/face_detect/models/yolov8.py) `process_output`.
+- YuNet is a CPU lab toy, not this pipeline.
 
 **Landmarks — InsightFace 2d106det with the official 1.5× loose crop, not a raw-box resize.**
 
@@ -551,12 +552,12 @@ Never a general COCO-m. Never inside the face loop.
 
 ### Engine / I/O contracts (frozen)
 
-Hashes in the table are **placeholders** until `scripts/fetch_onnx.sh` (PR-00) downloads and writes the real SHA256 into `engines/MANIFEST.json`. PRs 04/06/07/09 must not merge without a filled hash. Licenses must be recorded; Ultralytics YOLOv8 is AGPL-3.0 — if that is unacceptable for the product, swap the object net before v1 freeze (open question 10).
+Hashes below are **UniFace-published** (PR-00 must re-hash after download). PRs 04/06/09 must not merge without a matching `engines/MANIFEST.json`. Object YOLO remains AGPL-3.0 (open question 10) — the **face** net is MIT SCRFD.
 
 | Engine | Artifact | License (verify at fetch) | Input | Color / norm | Output | Decode |
 | --- | --- | --- | --- | --- | --- | --- |
-| Face | derronqi `yolov8n-face` ONNX, imgsz=640 square. Export off-box: `yolo export model=yolov8n-face.pt format=onnx opset=12 imgsz=640 simplify=True`. Upstream: https://github.com/derronqi/yolov8-face | Check repo (often AGPL via Ultralytics) | `images` `1×3×640×640` FP32/FP16 NCHW | **RGB** `/255` | `output0` **`1×20×8400`** | See pseudocode below |
-| Landmarks | InsightFace `2d106det.onnx` from `buffalo_l` (https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip, file `2d106det.onnx`) | InsightFace model terms (record at fetch; often research-use) | `data` `1×3×192×192` | **RGB**, mean 0, std 1 (float32 0–255, **not** `/255`) | `fc1` `1×212` | reshape 106×2, `[-1,1]` → crop px → inverse affine |
+| Face | UniFace `scrfd_500m_kps.onnx` SHA256 `5e4447f5…ea3a` | MIT (InsightFace/UniFace attribution) | dump in PR-00 (typically `1×3×640×640`) | **BGR** `(x-127.5)/127.5` | 9 tensors (score/bbox/kps × strides 8/16/32) | UniFace `SCRFD.postprocess` (distance2bbox / distance2kps + NMS). Dump names; do not assume. |
+| Landmarks | UniFace `2d106det.onnx` `https://github.com/yakhyo/uniface/releases/download/weights/2d106det.onnx` SHA256 `f001b856447c413801ef5c42091ed0cd516fcd21f2d6b79635b1e733a7109dbf` | InsightFace model terms (record at fetch) | dump in PR-00 (typically `data` `1×3×192×192`) | **RGB**, mean 0, std 1 (float32 0–255, **not** `/255`) | dump (often `fc1` `1×212`) | reshape 106×2, `[-1,1]` → crop px → inverse affine |
 | Pose v1 | none | — | 6×2D full-frame + 6×3D mm | — | yaw/pitch/roll deg | `cv2.solvePnP` |
 | Pose v1.1 | 6DRepNet-A0 ONNX, static 224, 6D output. **Not** this repo’s B1g2 snapshot | TBD with checkpoint | `input` `1×3×224×224` | RGB, ImageNet mean/std | `1×6` ortho6d | CPU 6D→R→euler; no in-graph atan2 |
 | Objects | Ultralytics YOLOv8n COCO 320. `yolo export model=yolov8n.pt format=onnx opset=12 imgsz=320` | AGPL-3.0 | `images` `1×3×320×320` | RGB `/255` | `1×84×2100` typical | xywh + 80 cls; keep class **67 cell phone** |
@@ -578,58 +579,54 @@ idx = nms(xyxy, obj[keep], iou=0.45)        # single-class NMS
 
 Letterbox forward (inference preprocess): `scale = min(640/1280, 640/720) = 0.5` → resized `640×360`; pad top=140, bottom=140, **value 114**; result `640×640`. Same `scale`/`pad` used to invert boxes.
 
-**Working 106-pt index table** (JD-106-shaped, counts to 106). This is the **starting** map for EAR/MAR/PnP so the rest of the design can be implemented. Public 2d106det maps disagree (e.g. UniFace: nose 51–62, eyes 63–86, mouth 87–105). If index 60 is not the left outer canthus on `buffalo_l` `2d106det.onnx`, MICROSLEEP/YAWN are silently wrong.
+**Frozen 106-pt index table = UniFace Landmark106** (same `2d106det.onnx`). Counts to 106. JD-106 is **not** used.
 
 **Verification (required, not optional):**
 
-- PR-00 dumps actual ONNX input/output names (`onnx` or `trtexec --dumpLayerInfo`); do not assume `data` / `fc1`.
-- PR-06 overlays predicted points on a fixture vs the InsightFace `coordinate_reg` 106-point diagram and **rewrites** `dms/geometry/face106.py` if the semantic labels do not match. The inverse-affine “2 px mean error” test is **not** this check.
-- **All** EAR/MAR/PnP/lid-center code imports named constants from `face106.py`. Do not scatter `60`/`64`/`76` literals in `ear.py` / `mar.py` / `pnp.py`.
+- PR-00 dumps actual ONNX input/output names; do not assume `data` / `fc1`.
+- PR-06 overlays predicted points vs UniFace’s Landmark106 diagram / InsightFace `coordinate_reg` and **rewrites** `dms/geometry/face106.py` if labels do not match. The inverse-affine “2 px mean error” test is **not** this check.
+- **All** EAR/MAR/PnP/lid-center code imports named constants from `face106.py`. Do not scatter index literals.
 
 `dms/geometry/face106.py` is the **only** place this table may be corrected. Do not mix with iBUG-68 or MediaPipe 468.
 
 ```
-contour     0..32
+contour     0..32      # 33 pts; 16 = chin (UniFace PnP)
 brow_L      33..41     # subject left
 brow_R      42..50
-nose        51..59     # 54 = nose tip
-eye_L       60..67     # 8-pt lid, 60=outer, 64=inner
-eye_R       68..75     # 68=outer, 72=inner
-mouth_outer 76..87     # 12-pt, 76=left corner, 82=right, 79=upper mid, 85=lower mid
-mouth_inner 88..95
-eye_center_L 96        # extra; NOT an iris
-eye_center_R 97
-extra       98..105
+nose        51..62     # 12 pts; 51 = nose tip (UniFace PnP)
+eye_L       63..71     # 63:72 → 9 pts; 63 = left eye corner
+eye_R       76..83     # 76:84 → 8 pts; 76 = right eye corner  (72..75 unused in UniFace extract)
+mouth       87..105    # 19 pts; 87 = left corner, 93 = right corner
 ```
 
-EAR 6-point (Soukupová & Čech order p1..p6 = outer, upper-outer, upper-inner, inner, lower-inner, lower-outer):
+EAR 6-point on the UniFace eye slices (Soukupová & Čech p1..p6 = outer, upper-outer, upper-inner, inner, lower-inner, lower-outer). First 6 of each documented slice is the starting map; PR-06 overlay may reorder:
 
 ```
-LEFT_EYE_EAR  = (60, 61, 63, 64, 65, 67)
-RIGHT_EYE_EAR = (68, 69, 71, 72, 73, 75)
+LEFT_EYE_PTS  = range(63, 72)
+RIGHT_EYE_PTS = range(76, 84)
 EAR = (|p2-p6| + |p3-p5|) / (2 |p1-p4|)
 EAR_face = 0.5 * (EAR_L + EAR_R)
 ```
 
-MAR:
+MAR (UniFace mouth corners + vertical midpoints — starting; overlay may correct):
 
 ```
-MOUTH_LEFT, MOUTH_RIGHT, MOUTH_UP, MOUTH_LOW = 76, 82, 79, 85
+MOUTH_LEFT, MOUTH_RIGHT, MOUTH_UP, MOUTH_LOW = 87, 93, 89, 95
 MAR = |UP-LOW| / |LEFT-RIGHT|
 ```
 
-Lid-center (gaze v1): `mean(eye_L[60:68])`, `mean(eye_R[68:76])`. Prefer 96/97 when they are finite and within the lid bbox; still not irises.
+Lid-center (gaze v1): `mean(eye_L)`, `mean(eye_R)`. **Not irises.**
 
-PnP 6-point subset + canonical 3D mean face (mm), OpenCV camera frame, origin at nose tip, +X right, +Y down, +Z toward camera:
+PnP 6-point subset (UniFace docs) + canonical 3D mean face (mm), OpenCV camera frame, origin at nose tip, +X right, +Y down, +Z toward camera:
 
 ```
 # index : 3D mm
-60 left outer  : (-34.0, -30.0, -30.0)
-64 left inner  : (-12.0, -30.0, -30.0)
-72 right inner : ( 12.0, -30.0, -30.0)
-68 right outer : ( 34.0, -30.0, -30.0)
-54 nose tip    : (  0.0,   0.0,   0.0)
-mouth center   : (  0.0,  32.0, -28.0)   # 2D = 0.5*(pt[76]+pt[82])
+51 nose tip     : (  0.0,   0.0,   0.0)
+16 chin         : (  0.0,  32.0, -28.0)   # UniFace sample used -330 chin in a different scale; freeze mm table here
+63 left outer   : (-34.0, -30.0, -30.0)
+76 right outer  : ( 34.0, -30.0, -30.0)
+87 left mouth   : (-20.0,  20.0, -28.0)
+93 right mouth  : ( 20.0,  20.0, -28.0)
 ```
 
 `cv2.solvePnP(..., flags=cv2.SOLVEPNP_ITERATIVE)` then `Rodrigues` → yaw/pitch/roll with the same convention as `draw_axis` in [`drepnet/utils.py`](/home/nvidia/myspace/DMS/models/headpose/drepnet/utils.py) (debug only). Unit-test sign: a face looking camera-left must produce yaw of the documented sign after `forward_zero`.
@@ -1346,7 +1343,9 @@ Source: **system** `jtop` (jetson-stats **7.2.1** already installed — do not p
 
 This is a vehicle ECU-style service, not a web app. Rollout is **software stages on the same NX**, not canary traffic.
 
-1. **Dev replay** (no camera): file source, overlay on, clips off. Gate = unit tests + e2e p95 on a checked-in 30 s MP4.
+**Phase 1 (this implementation cut) = Dev replay plumbing, not yet full DMS:** PR-00 + PR-01 + PR-02 + PR-03. Gate = `python -m dms.app --help`, YAML validate, GST `videotestsrc`/`filesrc` 720p BGRx copy-before-unmap, unit tests, `scripts/fetch_onnx.sh` for SCRFD-500m + 2d106det, TensorRT wrapper ctypes path. **No** face decode, tracker, or alerts yet (those are phase 1 *product* replay once PR-04+ land). Overlay/clips stay off.
+
+1. **Dev replay** (no camera): file source, overlay on, clips off. Gate = unit tests + e2e p95 on a checked-in 30 s MP4 (full gate after PR-04…08).
 2. **Lab USB camera** (when one is plugged in): 20 W, display on, GPIO buzzer optional.
 3. **Lab CSI/NIR**: lock exposure, night fixture, re-tune EAR.
 4. **Headless 20 W**: systemd, clips optional, 8 h soak, watch RAM/temp.
@@ -1454,7 +1453,7 @@ Product questions — **not silently decided**. Recommended default in parenthes
 7. **Target FPS / resolution if a camera is already on order?** Does **not** reopen K4. **Recommend: 1280×720 @ 15 FPS contract at 20 W 6-core** (appsink and inference size stay 720p). 30 FPS is stretch after measured overlap, not a v1 promise. If the *module* is 1080p-only, VIC downscales to 720p **before** appsink; a 1080p appsink is still not v1.
 8. **LHD vs RHD seat ROI?** Default LHD `[0.0, 0.0, 0.65, 1.0]`. Confirm market.
 9. **Cigarette required in v1?** **Recommend: no** (no COCO class, no weights). Phone yes.
-10. **Who owns off-box ONNX export and licenses?** v1 needs derronqi yolov8n-face (likely AGPL) + InsightFace `2d106det` from `buffalo_l` + Ultralytics yolov8n (AGPL). 6DRepNet-A0 is v1.1. `scripts/fetch_onnx.sh` must write SHA256+license; PRs 04/06/09 cannot merge without hashes. Confirm AGPL is acceptable.
+10. **Who owns off-box ONNX export and licenses?** v1 **face** is UniFace SCRFD-500m (**MIT**). v1 **landmarks** is UniFace `2d106det` (InsightFace terms). v1 **phone** is still Ultralytics YOLOv8n (**AGPL-3.0**) — confirm AGPL is acceptable for the object net, or drop phone until a non-AGPL detector exists. Do not `pip install uniface`. 6DRepNet-A0 is v1.1. `scripts/fetch_onnx.sh` must write SHA256+license; PRs 04/06/09 cannot merge without hashes.
 
 ---
 
@@ -1490,9 +1489,9 @@ Legend: **P** = can start in parallel after its listed deps.
 ### PR-00 — Off-box ONNX fetch + hashes (blocks 04/06/09)
 
 - **Title:** `chore: pin ONNX artifacts with URL, SHA256, and license`
-- **Files/components:** `scripts/fetch_onnx.sh`; `tools/export/README.md` (derronqi yolov8n-face export, buffalo_l `2d106det`, ultralytics yolov8n-320; A0 pose documented as v1.1 not fetched); `engines/MANIFEST.json` with empty engine sha and filled onnx sha.
+- **Files/components:** `scripts/fetch_onnx.sh`; `tools/export/README.md`; `engines/MANIFEST.json` with UniFace URL+SHA256 for `scrfd_500m_kps.onnx` and `2d106det.onnx` (yolov8n-320 phone still listed AGPL, fetched only if OQ-10 allows).
 - **Depends on:** none (can land with PR-01)
-- **Description:** Download is off-box or on-NX wget; refuse to proceed if hash mismatches. Record AGPL/InsightFace terms. Dump actual ONNX input/output **names and shapes** into MANIFEST (do not assume `data`/`fc1`/`images`/`output0`). No TRT build yet.
+- **Description:** wget UniFace release URLs; refuse to proceed if hash mismatches. Record MIT/InsightFace/AGPL. Dump actual ONNX input/output **names and shapes** into MANIFEST. No TRT build yet. Do not vendor the `uniface` package.
 
 ### PR-01 — Repo hygiene + Python 3.8 venv + config schema
 
@@ -1519,10 +1518,10 @@ Legend: **P** = can start in parallel after its listed deps.
 
 ### PR-04 — Face detector + NMS + latency harness
 
-- **Title:** `feat: YOLOv8n-face FP16 GPU detector (1x20x8400 decode) and replay latency`
-- **Files/components:** `dms/infer/face_detector.py`; salvage **NMS only** from `models/face_detect/models/utils.py`; letterbox pad 114 + inverse; `tests/replay/`.
+- **Title:** `feat: SCRFD-500m FP16 GPU detector (InsightFace 3-stride decode) and replay latency`
+- **Files/components:** `dms/infer/face_detector.py` (port UniFace `SCRFD.postprocess` logic, not the package); salvage **NMS only** from `models/face_detect/models/utils.py`; `tests/replay/`.
 - **Depends on:** PR-00, PR-02, PR-03
-- **Description:** One detector pass per frame. Conf 0.45 / IoU 0.45. Histograms. If p95 yolo > 18 ms, file an issue (SCRFD is v1.1, not a flip). Do not port `process_output`.
+- **Description:** One detector pass per frame. Conf 0.5 / IoU 0.4. Histograms. Do not port YOLO `process_output`. If p95 > 18 ms, try SCRFD-10G only after a memory budget check — do not silently switch to GPL YOLOv8-face.
 
 ### PR-05 — BYTE-lite tracker + driver-seat ROI
 

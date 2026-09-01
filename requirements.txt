@@ -1,0 +1,6 @@
+numpy==1.23.5
+pydantic==1.10.15
+PyYAML==6.0.1
+pytest==7.4.4
+# Do NOT pip install opencv-python, tensorflow, torch, onnxruntime, uniface, jetson-stats.
+# System site-packages provide: cv2 (GStreamer), tensorrt, gi, Jetson.GPIO.

@@ -1,0 +1,35 @@
+source:
+  type: test
+  path: tests/replay/day_driver.mp4
+  dev: true
+  device: /dev/video0
+  sensor_id: 0
+  width: 1280
+  height: 720
+  fps: 30
+capture:
+  full_size: [1280, 720]
+  letterbox: [640, 640]
+  letterbox_pad_value: 0
+  queue_depth: 1
+camera:
+  fail_fatal: false
+models:
+  face:
+    engine: engines/scrfd_500m_640_fp16_gpu.engine
+    conf: 0.5
+    iou: 0.4
+    device: gpu
+  landmarks:
+    engine: engines/2d106det_192_fp16_gpu.engine
+    device: gpu
+display:
+  enabled: false
+privacy:
+  record_faces: false
+  telemetry: false
+health:
+  bind: 127.0.0.1
+  port: 8088
+  watchdog_s: 30
+require_engines: false
