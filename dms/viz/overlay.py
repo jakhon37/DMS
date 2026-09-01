@@ -21,21 +21,29 @@ def draw_faces(
     track_id: Optional[int] = None,
     alerts: Optional[List[str]] = None,
     yaw_rel: Optional[float] = None,
+    occupant_labels: Optional[List[Tuple[object, str]]] = None,
 ) -> np.ndarray:
     vis = bgr.copy()
+    label_by_face = {}
+    if occupant_labels:
+        for tr, role in occupant_labels:
+            if getattr(tr, "face", None) is not None:
+                label_by_face[id(tr.face)] = role
     for f in faces:
         x1, y1, x2, y2 = [int(v) for v in f.xyxy]
-        color = (0, 255, 255) if driver is not None and f is driver else (0, 255, 0)
-        thick = 3 if f is driver else 2
+        is_drv = driver is not None and f is driver
+        color = (0, 255, 255) if is_drv else (0, 255, 0)
+        thick = 3 if is_drv else 2
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, thick)
+        role = label_by_face.get(id(f), "DRV" if is_drv else "P")
         cv2.putText(
             vis,
-            "%.2f" % f.score,
-            (x1, max(0, y1 - 6)),
+            "%s %.2f" % (role, f.score),
+            (x1, max(16, y1 - 6)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            0.55,
             color,
-            1,
+            2,
             cv2.LINE_AA,
         )
         if f.kps is not None:
@@ -51,7 +59,17 @@ def draw_faces(
                 col = (0, 200, 255)
             cv2.circle(vis, (int(x), int(y)), 1, col, -1)
     y = 24
-    cv2.putText(vis, "faces=%d" % len(faces), (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2, cv2.LINE_AA)
+    n_pax = max(0, len(faces) - (1 if driver is not None else 0))
+    cv2.putText(
+        vis,
+        "occ=%d drv=%d pax=%d" % (len(faces), 1 if driver is not None else 0, n_pax),
+        (8, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (0, 200, 255),
+        2,
+        cv2.LINE_AA,
+    )
     if ear is not None:
         y += 26
         cv2.putText(vis, "EAR=%.3f" % ear, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)

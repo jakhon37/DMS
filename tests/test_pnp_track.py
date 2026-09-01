@@ -4,6 +4,7 @@ import numpy as np
 
 from dms.geometry.pnp import rotation_to_ypr, solve_head_pose
 from dms.infer.scrfd import FaceDet
+from dms.track.driver_select import pick_driver
 from dms.track.iou_tracker import IouTracker, _iou
 
 
@@ -39,6 +40,19 @@ def test_pnp_returns_finite_on_frontalish():
     assert pose is not None
     yaw, pitch, roll = pose
     assert np.isfinite([yaw, pitch, roll]).all()
+
+
+def test_pick_driver_no_fallback_returns_none():
+    pax = FaceDet(xyxy=np.array([10, 10, 80, 80], np.float32), score=0.9)
+    assert pick_driver([pax], [0.5, 0.0, 1.0, 1.0], (640, 480), fallback=False) is None
+
+
+def test_pick_driver_largest_in_roi_not_highest_score():
+    small_hi = FaceDet(xyxy=np.array([10, 10, 40, 50], np.float32), score=0.99)
+    big_lo = FaceDet(xyxy=np.array([200, 80, 400, 360], np.float32), score=0.70)
+    # ROI is the right half (minivan-style)
+    d = pick_driver([small_hi, big_lo], [0.4, 0.0, 1.0, 1.0], (640, 480))
+    assert d is big_lo
 
 
 def test_rotation_identity_near_zero():

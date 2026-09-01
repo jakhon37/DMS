@@ -144,6 +144,7 @@ class AppConfig(BaseModel):
     health: HealthConfig = HealthConfig()
     power: PowerConfig = PowerConfig()
     driver_roi: List[float] = Field(default_factory=lambda: [0.0, 0.0, 0.65, 1.0])
+    driver_fallback: bool = True  # if False, empty ROI => no driver (don't steal passengers)
     forward_zero: ForwardZero = ForwardZero()
     seat: str = "lhd"
     require_engines: bool = False
@@ -162,8 +163,11 @@ def _merge(a: dict, b: dict) -> dict:
 def load_config(path: str) -> AppConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
-    veh = os.path.join(os.path.dirname(os.path.abspath(path)), "vehicle.yaml")
-    if os.path.isfile(veh):
+    veh = None
+    # Machine-specific zeros apply to default.yaml only (not minivan.yaml etc.)
+    if os.path.basename(path) == "default.yaml":
+        veh = os.path.join(os.path.dirname(os.path.abspath(path)), "vehicle.yaml")
+    if veh and os.path.isfile(veh):
         with open(veh, "r") as f:
             extra = yaml.safe_load(f) or {}
         raw = _merge(raw, extra)

@@ -80,7 +80,7 @@ def main(argv: list | None = None) -> int:
         from dms.infer.scrfd import ScrfdDetector
         from dms.runtime.trt_engine import TrtEngine
         from dms.state.driver_state import DriverMonitor, angdiff
-        from dms.track.driver_select import pick_driver
+        from dms.track.driver_select import label_occupants, pick_driver
         from dms.track.iou_tracker import IouTracker
         from dms.viz.overlay import draw_faces
 
@@ -123,7 +123,9 @@ def main(argv: list | None = None) -> int:
             h, w = bgr.shape[:2]
             tracks = tracker.update(faces) if tracker is not None else []
             live = [t for t in tracks if t.face is not None]
-            driver_face = pick_driver([t.face for t in live], cfg.driver_roi, (w, h))
+            driver_face = pick_driver(
+                [t.face for t in live], cfg.driver_roi, (w, h), fallback=cfg.driver_fallback
+            )
             driver_track = None
             for t in live:
                 if t.face is driver_face:
@@ -192,6 +194,7 @@ def main(argv: list | None = None) -> int:
                 track_id=None if driver_track is None else driver_track.track_id,
                 alerts=alert_names,
                 yaw_rel=yaw_rel,
+                occupant_labels=label_occupants(live, driver_face),
             )
             preview = vis
         if args.save_video:
