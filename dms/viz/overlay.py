@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from dms.geometry.face106 import LEFT_EYE, MOUTH, RIGHT_EYE
+from dms.geometry.face106 import LEFT_EYE, MOUTH, NOSE_TIP, RIGHT_EYE
 from dms.infer.scrfd import FaceDet
 
 
@@ -17,6 +17,8 @@ def draw_faces(
     landmarks106: Optional[np.ndarray] = None,
     ear: Optional[float] = None,
     mar: Optional[float] = None,
+    pose: Optional[Tuple[float, float, float]] = None,
+    track_id: Optional[int] = None,
 ) -> np.ndarray:
     vis = bgr.copy()
     for f in faces:
@@ -54,4 +56,39 @@ def draw_faces(
     if mar is not None:
         y += 26
         cv2.putText(vis, "MAR=%.3f" % mar, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 180, 255), 2, cv2.LINE_AA)
+    if pose is not None:
+        yaw, pitch, roll = pose
+        y += 26
+        cv2.putText(
+            vis,
+            "yaw=%.0f pitch=%.0f" % (yaw, pitch),
+            (8, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 200, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        if landmarks106 is not None:
+            tdx, tdy = int(landmarks106[NOSE_TIP][0]), int(landmarks106[NOSE_TIP][1])
+            _draw_axis(vis, yaw, pitch, roll, tdx, tdy, size=80)
+    if track_id is not None:
+        y += 26
+        cv2.putText(vis, "id=%d" % track_id, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
     return vis
+
+
+def _draw_axis(img, yaw, pitch, roll, tdx, tdy, size=80) -> None:
+    """Same convention as models/headpose/drepnet/utils.py draw_axis."""
+    pitch = pitch * np.pi / 180.0
+    yaw = -(yaw * np.pi / 180.0)
+    roll = roll * np.pi / 180.0
+    x1 = size * (np.cos(yaw) * np.cos(roll)) + tdx
+    y1 = size * (np.cos(pitch) * np.sin(roll) + np.cos(roll) * np.sin(pitch) * np.sin(yaw)) + tdy
+    x2 = size * (-np.cos(yaw) * np.sin(roll)) + tdx
+    y2 = size * (np.cos(pitch) * np.cos(roll) - np.sin(pitch) * np.sin(yaw) * np.sin(roll)) + tdy
+    x3 = size * (np.sin(yaw)) + tdx
+    y3 = size * (-np.cos(yaw) * np.sin(pitch)) + tdy
+    cv2.line(img, (int(tdx), int(tdy)), (int(x1), int(y1)), (0, 0, 255), 3)
+    cv2.line(img, (int(tdx), int(tdy)), (int(x2), int(y2)), (0, 255, 0), 3)
+    cv2.line(img, (int(tdx), int(tdy)), (int(x3), int(y3)), (255, 0, 0), 3)

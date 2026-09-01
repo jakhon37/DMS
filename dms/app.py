@@ -73,10 +73,12 @@ def main(argv: list | None = None) -> int:
 
         from dms.geometry.ear import face_ear
         from dms.geometry.mar import mouth_aspect_ratio
+        from dms.geometry.pnp import solve_head_pose
         from dms.infer.landmarks import Landmark106
         from dms.infer.scrfd import ScrfdDetector
         from dms.runtime.trt_engine import TrtEngine
         from dms.track.driver_select import pick_driver
+        from dms.track.iou_tracker import IouTracker
         from dms.viz.overlay import draw_faces
 
         log.info("loading detector %s", cfg.models.face.engine)
@@ -95,6 +97,7 @@ def main(argv: list | None = None) -> int:
     last_id = 0
     n_faces = 0
     infer_ms = []
+    tracker = IouTracker() if args.detect else None
     while not _STOP:
         frame = src.read(timeout_s=1.0)
         if frame is None:
@@ -107,20 +110,39 @@ def main(argv: list | None = None) -> int:
         vis = bgr
         faces = []
         ear = mar = None
+        pose = None
         if detector is not None:
             t1 = time.monotonic()
             faces = detector.detect(bgr)
             h, w = bgr.shape[:2]
-            driver = pick_driver(faces, cfg.driver_roi, (w, h))
+            tracks = tracker.update(faces) if tracker is not None else []
+            live = [t for t in tracks if t.face is not None]
+            driver_face = pick_driver([t.face for t in live], cfg.driver_roi, (w, h))
+            driver_track = None
+            for t in live:
+                if t.face is driver_face:
+                    driver_track = t
+                    break
             lmk = None
-            if landmarker is not None and driver is not None:
-                lmk = landmarker.infer_one(bgr, driver.xyxy)
+            pose = None
+            if landmarker is not None and driver_face is not None:
+                lmk = landmarker.infer_one(bgr, driver_face.xyxy)
                 if lmk is not None:
                     ear = face_ear(lmk)
                     mar = mouth_aspect_ratio(lmk)
+                    pose = solve_head_pose(lmk, (w, h))
             infer_ms.append((time.monotonic() - t1) * 1000.0)
             n_faces += len(faces)
-            vis = draw_faces(bgr, faces, driver=driver, landmarks106=lmk, ear=ear, mar=mar)
+            vis = draw_faces(
+                bgr,
+                faces,
+                driver=driver_face,
+                landmarks106=lmk,
+                ear=ear,
+                mar=mar,
+                pose=pose,
+                track_id=None if driver_track is None else driver_track.track_id,
+            )
             preview = vis
         if args.save_video:
             if writer is None:
@@ -143,13 +165,14 @@ def main(argv: list | None = None) -> int:
                 xs = sorted(infer_ms)
                 p95 = xs[min(len(xs) - 1, int(0.95 * (len(xs) - 1)))]
             log.info(
-                "frames=%s fps=%.1f infer_p95_ms=%.1f faces_last=%s ear=%s mar=%s",
+                "frames=%s fps=%.1f infer_p95_ms=%.1f faces_last=%s ear=%s mar=%s pose=%s",
                 n,
                 fps,
                 p95,
                 len(faces),
                 None if ear is None else round(ear, 3),
                 None if mar is None else round(mar, 3),
+                None if pose is None else (round(pose[0], 1), round(pose[1], 1)),
             )
         sd_notify("WATCHDOG=1")
         if args.max_frames and n >= args.max_frames:
