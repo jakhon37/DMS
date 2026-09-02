@@ -25,7 +25,12 @@ class GstSource:
         self._thread: Optional[threading.Thread] = None
         self._pipeline = None
         self._frame_id = 0
+        self._eos = threading.Event()
         self.source = SourceType(cfg.source.type)
+
+    @property
+    def eos(self) -> bool:
+        return self._eos.is_set()
 
     def start(self) -> None:
         import gi
@@ -60,9 +65,19 @@ class GstSource:
             log.error("appsink 'full' missing")
             return
         w, h = self._cfg.source.width, self._cfg.source.height
+        bus = self._pipeline.get_bus()
         while not self._stop.is_set():
             sample = sink.emit("try-pull-sample", 100 * Gst.MSECOND)
             if sample is None:
+                msg = bus.pop_filtered(Gst.MessageType.EOS | Gst.MessageType.ERROR) if bus is not None else None
+                if msg is not None:
+                    if msg.type == Gst.MessageType.EOS:
+                        log.info("gst EOS")
+                    else:
+                        err, debug = msg.parse_error()
+                        log.error("gst error: %s %s", err, debug)
+                    self._eos.set()
+                    break
                 continue
             buf = sample.get_buffer()
             if buf is None:
@@ -87,6 +102,14 @@ class GstSource:
             self._push(frame)
 
     def _push(self, frame: Frame) -> None:
+        if self._cfg.source.type == "file":
+            while not self._stop.is_set():
+                try:
+                    self._q.put(frame, timeout=0.2)
+                    return
+                except Full:
+                    continue
+            return
         try:
             self._q.put_nowait(frame)
         except Full:

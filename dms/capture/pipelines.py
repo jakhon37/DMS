@@ -7,10 +7,14 @@ def build_pipeline(cfg: AppConfig) -> str:
     """Single 720p BGRx appsink. nvvidconv cannot emit BGR on this Jetson."""
     w, h = cfg.source.width, cfg.source.height
     src = cfg.source.type
+    # File replay must not drop: decoder would EOS during TRT load / infer.
+    # Live sources drop so the latest frame wins.
+    drop = "false" if src == "file" else "true"
+    max_buffers = 4 if src == "file" else 1
     caps = (
         "nvvidconv ! video/x-raw,width=%d,height=%d,format=BGRx ! "
-        "appsink name=full emit-signals=false max-buffers=1 drop=true sync=false"
-        % (w, h)
+        "appsink name=full emit-signals=false max-buffers=%d drop=%s sync=false"
+        % (w, h, max_buffers, drop)
     )
     if src == "file":
         return (

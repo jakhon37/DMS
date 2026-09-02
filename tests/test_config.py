@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
 from dms.config.schema import load_config
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def test_replay_batch_config_for_clip():
+    sys_path_scripts = os.path.join(ROOT, "scripts")
+    if sys_path_scripts not in sys.path:
+        sys.path.insert(0, sys_path_scripts)
+    import run_all_replay as batch
+
+    assert batch.config_for_clip("tests/replay/day_driver.mp4") == "configs/default.yaml"
+    assert batch.config_for_clip("tests/replay/minivan.mp4") == "configs/minivan.yaml"
+    assert batch.config_for_clip("tests/replay/red_car_crash.mp4") == "configs/red_car_crash.yaml"
+    assert batch.config_for_clip("tests/replay/family_vacation_crash.mp4") == "configs/family_vacation_crash.yaml"
+    assert batch.config_for_clip("tests/replay/rear_end_whiplash.mp4") == "configs/default.yaml"
 
 
 def test_default_yaml_loads():

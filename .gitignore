@@ -15,6 +15,7 @@ data/events.jsonl
 configs/vehicle.yaml
 tests/replay/*.jpg
 tests/replay/*.avi
+tests/replay/runs/
 !tests/replay/.gitkeep
 .idea/
 .vscode/

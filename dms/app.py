@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -23,7 +24,8 @@ def _handle_stop(signum, frame) -> None:
 def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dms", description="Xavier NX Driver Monitoring System")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--max-frames", type=int, default=0, help="exit after N frames (0 = run)")
+    parser.add_argument("--source", default="", help="override source.path for file replay")
+    parser.add_argument("--max-frames", type=int, default=0, help="exit after N frames (0 = until EOS on file)")
     parser.add_argument("--detect", action="store_true", help="run SCRFD face detector")
     parser.add_argument("--save-preview", default="", help="write last annotated JPEG")
     parser.add_argument("--save-video", default="", help="write annotated MJPG avi")
@@ -39,12 +41,15 @@ def main(argv: list | None = None) -> int:
         log.error("bad config: %s", exc)
         return 2
 
+    if args.source:
+        cfg.source.type = "file"
+        cfg.source.path = args.source
+        cfg.source.dev = True
+
     if cfg.source.type in ("file", "test") and not cfg.source.dev:
         log.warning("SOURCE_FILE source.type=%s path=%s (set source.dev true for lab)", cfg.source.type, cfg.source.path)
 
     if cfg.source.type == "file":
-        import os
-
         if not os.path.isfile(cfg.source.path):
             log.error("replay file missing: %s", cfg.source.path)
             return 2
@@ -52,27 +57,11 @@ def main(argv: list | None = None) -> int:
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
 
-    src = GstSource(cfg)
-    try:
-        src.start()
-    except Exception as exc:
-        log.error("capture start failed: %s", exc)
-        if cfg.camera.fail_fatal or cfg.source.type == "file":
-            return 1
-        log.warning("camera.fail_fatal=false; notifying READY anyway")
-        sd_notify("READY=1")
-        while not _STOP:
-            time.sleep(1.0)
-            sd_notify("WATCHDOG=1")
-        return 0
-
     detector = None
     landmarker = None
     writer = None
     preview = None
     if args.detect:
-        import os
-
         from dms.geometry.ear import face_ear
         from dms.geometry.mar import mouth_aspect_ratio
         from dms.geometry.pnp import solve_head_pose
@@ -94,11 +83,35 @@ def main(argv: list | None = None) -> int:
         else:
             log.warning("landmarks engine missing: %s", cfg.models.landmarks.engine)
 
+    src = GstSource(cfg)
+    try:
+        src.start()
+    except Exception as exc:
+        log.error("capture start failed: %s", exc)
+        if cfg.camera.fail_fatal or cfg.source.type == "file":
+            return 1
+        log.warning("camera.fail_fatal=false; notifying READY anyway")
+        sd_notify("READY=1")
+        while not _STOP:
+            time.sleep(1.0)
+            sd_notify("WATCHDOG=1")
+        return 0
+
+    if args.save_video:
+        d = os.path.dirname(args.save_video)
+        if d:
+            os.makedirs(d, exist_ok=True)
+    if args.events:
+        d = os.path.dirname(args.events)
+        if d:
+            os.makedirs(d, exist_ok=True)
+
     sd_notify("READY=1")
     t0 = time.monotonic()
     n = 0
     last_id = 0
     n_faces = 0
+    misses = 0
     infer_ms = []
     tracker = IouTracker() if args.detect else None
     monitor = DriverMonitor(cfg) if args.detect else None
@@ -107,7 +120,13 @@ def main(argv: list | None = None) -> int:
     while not _STOP:
         frame = src.read(timeout_s=1.0)
         if frame is None:
+            if cfg.source.type == "file" and src.eos:
+                break
+            if cfg.source.type == "file" and n > 0 and misses >= 5:
+                break
+            misses += 1
             continue
+        misses = 0
         if not frame.ok or frame.full_bgra is None:
             continue
         n += 1
@@ -203,7 +222,7 @@ def main(argv: list | None = None) -> int:
 
                 h, w = vis.shape[:2]
                 writer = cv2.VideoWriter(
-                    args.save_video, cv2.VideoWriter_fourcc(*"MJPG"), 15.0, (w, h)
+                    args.save_video, cv2.VideoWriter_fourcc(*"MJPG"), float(cfg.source.fps), (w, h)
                 )
                 if not writer.isOpened():
                     log.error("could not open video writer %s", args.save_video)
@@ -235,7 +254,6 @@ def main(argv: list | None = None) -> int:
         writer.release()
     if args.save_preview and preview is not None:
         import cv2
-        import os
 
         os.makedirs(os.path.dirname(args.save_preview) or ".", exist_ok=True)
         cv2.imwrite(args.save_preview, preview)
@@ -243,8 +261,6 @@ def main(argv: list | None = None) -> int:
     if event_fh is not None:
         event_fh.close()
     if args.calibrate_forward and calib_yaw:
-        import os
-
         import yaml
 
         def _med(xs):
