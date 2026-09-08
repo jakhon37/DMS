@@ -8,6 +8,11 @@ Download with the aarch64 yt-dlp binary, 720p H.264 (`-f 136`). `family_vacation
 | `minivan.mp4` | `configs/minivan.yaml` | [Z0cqqe7aU70](https://www.youtube.com/watch?v=Z0cqqe7aU70) | 1:00 | Multi-occupant; driver on **right**; `driver_fallback: false`. |
 | `red_car_crash.mp4` | `configs/red_car_crash.yaml` | [0RQewd3JYwU](https://www.youtube.com/watch?v=0RQewd3JYwU) | 1:52 | [Red Car Crash](https://www.youtube.com/playlist?list=PLRx21j1TOaNbMaPnPvHCF2p23taexwnR6) inside view. Driver on **left**; `driver_fallback: false`. |
 | `family_vacation_crash.mp4` | `configs/family_vacation_crash.yaml` | [S6eIh11oHwQ](https://www.youtube.com/watch?v=S6eIh11oHwQ) | 1:02 | Same playlist, 360p H.264. Driver on **right** + passenger; `driver_fallback: false`. |
+| `rear_end_accident.mp4` | `configs/rear_end_accident.yaml` | [0rR33uj1NUA](https://www.youtube.com/watch?v=0rR33uj1NUA) | 0:06 | Driver on **right** (wheel); hoodie is passenger. |
+| `guy_rear_ended.mp4` | `configs/guy_rear_ended.yaml` | [35wu7Bx88_M](https://www.youtube.com/watch?v=35wu7Bx88_M) | 1:01 | Single driver on **right**. |
+| `bmw_rear_ended.mp4` | `configs/bmw_rear_ended.yaml` | [JKLoycTetrE](https://www.youtube.com/watch?v=JKLoycTetrE) | 0:13 | Single driver on **right**. |
+| `getting_rear_ended.mp4` | `configs/getting_rear_ended.yaml` | [uW9EuuQJDuM](https://www.youtube.com/watch?v=uW9EuuQJDuM) | 0:39 | Driver on **right**; woman on left is passenger. |
+| `rear_end_whiplash.mp4` | `configs/rear_end_whiplash.yaml` | [R43Q9dHhNF8](https://www.youtube.com/watch?v=R43Q9dHhNF8) | 0:18 | Driver on **right** (wheel); yellow shirt is passenger. |
 
 All local `*.mp4` files (with overlay + last-frame JPEG + events) into a new folder:
 

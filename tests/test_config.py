@@ -20,7 +20,12 @@ def test_replay_batch_config_for_clip():
     assert batch.config_for_clip("tests/replay/minivan.mp4") == "configs/minivan.yaml"
     assert batch.config_for_clip("tests/replay/red_car_crash.mp4") == "configs/red_car_crash.yaml"
     assert batch.config_for_clip("tests/replay/family_vacation_crash.mp4") == "configs/family_vacation_crash.yaml"
-    assert batch.config_for_clip("tests/replay/rear_end_whiplash.mp4") == "configs/default.yaml"
+    assert batch.config_for_clip("tests/replay/rear_end_accident.mp4") == "configs/rear_end_accident.yaml"
+    assert batch.config_for_clip("tests/replay/guy_rear_ended.mp4") == "configs/guy_rear_ended.yaml"
+    assert batch.config_for_clip("tests/replay/bmw_rear_ended.mp4") == "configs/bmw_rear_ended.yaml"
+    assert batch.config_for_clip("tests/replay/getting_rear_ended.mp4") == "configs/getting_rear_ended.yaml"
+    assert batch.config_for_clip("tests/replay/rear_end_whiplash.mp4") == "configs/rear_end_whiplash.yaml"
+    assert batch.config_for_clip("tests/replay/unknown_clip.mp4") == "configs/default.yaml"
 
 
 def test_default_yaml_loads():
