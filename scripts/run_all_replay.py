@@ -41,6 +41,27 @@ def list_clips(clips_dir):
     return names
 
 
+def _avail_mb():
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    return 0
+
+
+def wait_for_memory(min_avail_mb, poll_s=10):
+    """Block until MemAvailable is high enough (other TRT jobs may be building)."""
+    if min_avail_mb <= 0:
+        return
+    while True:
+        avail = _avail_mb()
+        if avail >= min_avail_mb:
+            print("mem avail=%d MiB (need %d) — go" % (avail, min_avail_mb))
+            return
+        print("mem avail=%d MiB < %d; waiting for other processes" % (avail, min_avail_mb))
+        time.sleep(poll_s)
+
+
 def _run_one(cmd, log_path, env):
     with open(log_path, "w") as logf:
         proc = subprocess.Popen(
@@ -65,17 +86,32 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Batch-run all replay mp4s into a new folder")
     parser.add_argument("--clips-dir", default=os.path.join(ROOT, "tests/replay"))
     parser.add_argument("--out-dir", default=os.path.join(ROOT, "tests/replay/runs"))
+    parser.add_argument("--run-dir", default="", help="reuse this run folder instead of a new timestamp")
+    parser.add_argument("--only", nargs="*", default=[], help="only these clip stems")
+    parser.add_argument("--skip-complete", action="store_true", help="skip clips that already have preview.jpg")
+    parser.add_argument(
+        "--min-avail-mb",
+        type=int,
+        default=1800,
+        help="wait until MemAvailable >= this before each clip (0 = never wait)",
+    )
     parser.add_argument("--max-frames", type=int, default=0, help="0 = until file EOS")
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args(argv)
 
     clips = list_clips(args.clips_dir)
+    if args.only:
+        want = set(args.only)
+        clips = [p for p in clips if os.path.splitext(os.path.basename(p))[0] in want]
     if not clips:
         sys.stderr.write("no mp4 files in %s\n" % args.clips_dir)
         return 2
 
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = os.path.join(args.out_dir, stamp)
+    if args.run_dir:
+        run_dir = os.path.abspath(args.run_dir)
+    else:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = os.path.join(args.out_dir, stamp)
     os.makedirs(run_dir, exist_ok=True)
 
     env = os.environ.copy()
@@ -87,6 +123,11 @@ def main(argv=None):
     for mp4 in clips:
         stem = os.path.splitext(os.path.basename(mp4))[0]
         clip_dir = os.path.join(run_dir, stem)
+        if args.skip_complete and os.path.isfile(os.path.join(clip_dir, "preview.jpg")):
+            print("=== %s skip (preview.jpg exists) ===" % stem)
+            results.append({"clip": stem, "config": config_for_clip(mp4), "rc": 0, "seconds": 0, "skipped": True})
+            continue
+        wait_for_memory(args.min_avail_mb)
         os.makedirs(clip_dir, exist_ok=True)
         cfg = config_for_clip(mp4)
         cmd = [
