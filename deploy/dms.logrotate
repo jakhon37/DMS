@@ -1,0 +1,9 @@
+/var/lib/dms/events.jsonl {
+    daily
+    rotate 14
+    size 50M
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

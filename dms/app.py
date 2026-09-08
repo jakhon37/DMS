@@ -9,7 +9,10 @@ import time
 
 from dms.capture.gst_source import GstSource
 from dms.config.schema import load_config
+from dms.io.gpio_alert import GpioAlert
+from dms.io.health import HealthServer, HealthState
 from dms.io.sd_notify import sd_notify
+from dms.io.thermal import gpu_clock_mhz, ram_used_mb, read_temps, thermal_throttle
 from dms.jsonlog import setup_logging
 
 log = logging.getLogger("dms.app")
@@ -54,8 +57,22 @@ def main(argv: list | None = None) -> int:
             log.error("replay file missing: %s", cfg.source.path)
             return 2
 
+    if cfg.require_engines:
+        missing = [p for p in (cfg.models.face.engine, cfg.models.landmarks.engine) if p and not os.path.isfile(p)]
+        if missing:
+            log.error("ENGINE_FAIL missing %s", missing)
+            return 1
+
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
+
+    health = HealthState()
+    health.source = cfg.source.type
+    health.dev_replay = cfg.source.type in ("file", "test")
+    health.camera = "starting"
+    hsv = HealthServer(health, bind=cfg.health.bind, port=cfg.health.port)
+    hsv.start()
+    gpio = GpioAlert(cfg.alerts.gpio_pin, buzzer=cfg.alerts.buzzer)
 
     detector = None
     landmarker = None
@@ -68,6 +85,7 @@ def main(argv: list | None = None) -> int:
         from dms.infer.landmarks import Landmark106
         from dms.infer.scrfd import ScrfdDetector
         from dms.runtime.trt_engine import TrtEngine
+        from dms.state.alerts import Severity
         from dms.state.driver_state import DriverMonitor, angdiff
         from dms.track.driver_select import label_occupants, pick_driver
         from dms.track.iou_tracker import IouTracker
@@ -83,18 +101,39 @@ def main(argv: list | None = None) -> int:
         else:
             log.warning("landmarks engine missing: %s", cfg.models.landmarks.engine)
 
+    health.engines = {
+        "face": cfg.models.face.device if detector is not None else "missing",
+        "landmarks": "gpu" if landmarker is not None else "missing",
+        "pose": cfg.models.pose.mode,
+        "objects": "off" if not cfg.models.objects.enabled else cfg.models.objects.engine,
+    }
+
     src = GstSource(cfg)
     try:
         src.start()
+        health.camera = "ok"
     except Exception as exc:
         log.error("capture start failed: %s", exc)
+        health.camera = "failed"
+        if cfg.source.type not in ("file", "test"):
+            health.ok = False
         if cfg.camera.fail_fatal or cfg.source.type == "file":
+            hsv.stop()
+            gpio.close()
             return 1
         log.warning("camera.fail_fatal=false; notifying READY anyway")
         sd_notify("READY=1")
         while not _STOP:
             time.sleep(1.0)
             sd_notify("WATCHDOG=1")
+            gpu_c, th_c = read_temps()
+            with health.lock:
+                health.ram_mb = ram_used_mb()
+                health.gpu_temp_c = gpu_c
+                health.thermal_c = th_c
+                health.gpu_clock_mhz = gpu_clock_mhz()
+        hsv.stop()
+        gpio.close()
         return 0
 
     if args.save_video:
@@ -113,6 +152,10 @@ def main(argv: list | None = None) -> int:
     n_faces = 0
     misses = 0
     infer_ms = []
+    last_wd = 0.0
+    last_wd_id = -1
+    thermal_on = False
+    clocks_low_logged = False
     tracker = IouTracker() if args.detect else None
     monitor = DriverMonitor(cfg) if args.detect else None
     calib_yaw, calib_pitch, calib_ear = [], [], []
@@ -134,6 +177,7 @@ def main(argv: list | None = None) -> int:
         bgr = frame.full_bgra[..., :3]
         vis = bgr
         faces = []
+        alert_names = []
         ear = mar = None
         pose = None
         if detector is not None:
@@ -198,23 +242,26 @@ def main(argv: list | None = None) -> int:
                 alert_names = ["%s:%s" % (k.value, v.value) for k, v in monitor.active.items()]
                 if monitor.yaw_ewma is not None:
                     yaw_rel = angdiff(monitor.yaw_ewma, cfg.forward_zero.yaw)
+                gpio.set_critical(monitor.highest_severity() == Severity.CRITICAL)
             if args.calibrate_forward and present and yaw is not None and ear is not None:
                 calib_yaw.append(yaw)
                 calib_pitch.append(pitch if pitch is not None else 0.0)
                 calib_ear.append(ear)
-            vis = draw_faces(
-                bgr,
-                faces,
-                driver=driver_face,
-                landmarks106=lmk,
-                ear=ear,
-                mar=mar,
-                pose=pose,
-                track_id=None if driver_track is None else driver_track.track_id,
-                alerts=alert_names,
-                yaw_rel=yaw_rel,
-                occupant_labels=label_occupants(live, driver_face),
-            )
+            want_overlay = bool(args.save_video or args.save_preview or cfg.display.enabled)
+            if want_overlay or not health.degraded:
+                vis = draw_faces(
+                    bgr,
+                    faces,
+                    driver=driver_face,
+                    landmarks106=lmk,
+                    ear=ear,
+                    mar=mar,
+                    pose=pose,
+                    track_id=None if driver_track is None else driver_track.track_id,
+                    alerts=alert_names,
+                    yaw_rel=yaw_rel,
+                    occupant_labels=label_occupants(live, driver_face),
+                )
             preview = vis
         if args.save_video:
             if writer is None:
@@ -246,7 +293,32 @@ def main(argv: list | None = None) -> int:
                 None if mar is None else round(mar, 3),
                 None if pose is None else (round(pose[0], 1), round(pose[1], 1)),
             )
-        sd_notify("WATCHDOG=1")
+            gpu_c, th_c = read_temps()
+            clock = gpu_clock_mhz()
+            hot = thermal_throttle(gpu_c, th_c)
+            if hot and not thermal_on:
+                log.warning("THERMAL_THROTTLE gpu=%s thermal=%s", gpu_c, th_c)
+                thermal_on = True
+            if not hot:
+                thermal_on = False
+            if clock is not None and clock < 300 and not clocks_low_logged:
+                log.warning("CLOCKS_LOW gpu_clock_mhz=%s", clock)
+                clocks_low_logged = True
+            with health.lock:
+                health.fps = fps
+                health.latency_ms = {"e2e_p95": round(p95, 1)}
+                health.frame_id = last_id
+                health.ram_mb = ram_used_mb()
+                health.gpu_temp_c = gpu_c
+                health.thermal_c = th_c
+                health.gpu_clock_mhz = clock
+                health.degraded = hot
+                health.alerts_active = list(alert_names) if detector is not None else []
+        now = time.monotonic()
+        if now - last_wd >= 5.0 and last_id != last_wd_id:
+            sd_notify("WATCHDOG=1")
+            last_wd = now
+            last_wd_id = last_id
         if args.max_frames and n >= args.max_frames:
             break
     src.stop()
@@ -287,6 +359,8 @@ def main(argv: list | None = None) -> int:
         mean_ms,
         n_faces,
     )
+    hsv.stop()
+    gpio.close()
     return 0
 
 

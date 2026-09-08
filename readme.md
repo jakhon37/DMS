@@ -41,6 +41,19 @@ Tests (CPU, no TRT required):
 PYTHONPATH=. pytest -q
 ```
 
+## systemd (headless)
+
+`READY=1` is sent after engines load even if CSI is missing (`camera.fail_fatal: false`). Health: `http://127.0.0.1:8088/healthz`.
+
+```bash
+sudo bash deploy/setup_jetson.sh          # does not change nvpmodel unless --apply-power
+# sudo bash deploy/setup_jetson.sh --apply-power
+sudo systemctl enable --now dms.service
+curl -s http://127.0.0.1:8088/healthz
+```
+
+Unit: `deploy/dms.service` (`Type=notify`, `TimeoutStartSec=90`, `WatchdogSec=30`, `User=dms`). Do not call `nvpmodel` / `jetson_clocks` from the app.
+
 ## UniFace
 
 [yakhyo/uniface](https://github.com/yakhyo/uniface) is the **ONNX + 106-pt index cookbook**. Runtime is TensorRT, not UniFace/ORT. Face detector is **SCRFD-500m** (MIT), not YOLOv8-face (GPL).

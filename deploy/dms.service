@@ -1,0 +1,25 @@
+[Unit]
+Description=Driver Monitoring System
+After=nvargus-daemon.service
+Wants=nvargus-daemon.service
+
+[Service]
+Type=notify
+User=dms
+Group=dms
+SupplementaryGroups=video gpio
+WorkingDirectory=/opt/dms
+Environment=PYTHONUNBUFFERED=1
+Environment=LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/local/cuda-11.4/lib64
+ExecStart=/opt/dms/.venv/bin/python -m dms.app --config /etc/dms/default.yaml --detect
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=90
+WatchdogSec=30
+LimitNOFILE=4096
+StateDirectory=dms
+RuntimeDirectory=dms
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

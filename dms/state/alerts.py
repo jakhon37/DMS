@@ -20,7 +20,10 @@ class AlertType(str, Enum):
     GAZE_AWAY = "gaze_away"
     PHONE = "phone"
     CAMERA_FAIL = "camera_fail"
+    THERMAL_THROTTLE = "thermal_throttle"
     ENGINE_FAIL = "engine_fail"
+    PIPELINE_STARVED = "pipeline_starved"
+    DISK_FULL = "disk_full"
 
 
 @dataclass

@@ -40,6 +40,9 @@ def test_production_yaml_loads():
     cfg = load_config(os.path.join(ROOT, "configs/production.yaml"))
     assert cfg.source.type == "csi"
     assert cfg.source.dev is False
+    assert cfg.require_engines is True
+    assert cfg.health.port == 8088
+    assert cfg.camera.fail_fatal is False
 
 
 def test_unknown_key_rejected(tmp_path):
