@@ -237,13 +237,8 @@ Parallelism that is safe: Phase 0 leftover-delete ∥ JSONL; Phase 2 ∥ Phase 1
 
 ---
 
-## 7. Immediate next slice
+## 7. Where we paused (2026-09-09)
 
-If the next command is “go”, start **Phase 0** in this order:
+**Phase 0 code is in** (`c7715f4`). systemd was **not** enabled (this board’s `sudo` needs a password).
 
-1. Delete leftover `models/` + stub `main.py` / `config/`
-2. `dms/io/events.py` + production JSONL path
-3. MANIFEST check + `production.yaml` EAR thresholds
-4. `sudo bash deploy/setup_jetson.sh` with file-source `/etc/dms/default.yaml` (no `--apply-power` unless you want 20 W lock)
-
-Camera work waits on hardware. Alert-quality (Phase 1) can start on the nine local mp4s the same week as Phase 0.
+Resume: [`STATUS.md`](STATUS.md). Next slice is **Phase 1** (golden alerts, PnP reject, per-vehicle zeros). Optional: `sudo bash deploy/setup_jetson.sh --lab`.

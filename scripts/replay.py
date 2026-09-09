@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase-1 replay: file/test source, no detectors."""
+"""Thin wrapper around python -m dms.app (same flags)."""
 from __future__ import annotations
 
 import os

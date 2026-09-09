@@ -26,16 +26,16 @@ Writes `tests/replay/runs/<timestamp>/<clip>/{preview.jpg,overlay.avi,events.jso
 
 ```bash
 # single driver
-PYTHONPATH=. python3 -m dms.app --config configs/default.yaml --detect --max-frames 60
+PYTHONPATH=. python3.8 -m dms.app --config configs/default.yaml --detect --max-frames 60
 
 # minivan occupants
-PYTHONPATH=. python3 -m dms.app --config configs/minivan.yaml --detect --max-frames 60
+PYTHONPATH=. python3.8 -m dms.app --config configs/minivan.yaml --detect --max-frames 60
 
 # inside crash
-PYTHONPATH=. python3 -m dms.app --config configs/red_car_crash.yaml --detect --max-frames 60 \
+PYTHONPATH=. python3.8 -m dms.app --config configs/red_car_crash.yaml --detect --max-frames 60 \
   --save-preview tests/replay/preview_crash.jpg
 
 # family vacation crash (driver on the right)
-PYTHONPATH=. python3 -m dms.app --config configs/family_vacation_crash.yaml --detect --max-frames 60 \
+PYTHONPATH=. python3.8 -m dms.app --config configs/family_vacation_crash.yaml --detect --max-frames 60 \
   --save-preview tests/replay/preview_family.jpg
 ```

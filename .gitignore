@@ -9,13 +9,13 @@ engines/*.engine
 engines/*.onnx
 engines/*.build.log
 !engines/MANIFEST.json
-models/*/weights
-data/events.jsonl
+data/*.jsonl
 !data/.gitkeep
 *.mp4
 configs/vehicle.yaml
 tests/replay/*.jpg
 tests/replay/*.avi
+tests/replay/*.jsonl
 tests/replay/runs/
 !tests/replay/.gitkeep
 .idea/

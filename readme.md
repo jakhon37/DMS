@@ -1,14 +1,29 @@
 # DMS — Driver Monitoring System (Jetson Xavier NX)
 
-Production-oriented DMS for **Jetson Xavier NX / JetPack 5.1.6 / TensorRT 8.5**.
+In-cabin drowsiness / distraction pipeline for **this** Xavier NX (JetPack 5.1.6, TensorRT 8.5, Python 3.8). Replay-first: there is **no camera** on the board.
 
-- Architecture: [`docs/production-dms-design.md`](docs/production-dms-design.md)
-- Status vs a vehicle freeze: [`docs/production-readiness.md`](docs/production-readiness.md) — **not production-ready yet**. Phase 0: packaging, JSONL, MANIFEST, leftover delete.
+**Not production-ready.** Pause snapshot: [`docs/STATUS.md`](docs/STATUS.md). Architecture: [`docs/production-dms-design.md`](docs/production-dms-design.md). Gap plan: [`docs/production-readiness.md`](docs/production-readiness.md).
 
-## This board
+## Do not
 
-- Python 3.8.10, CUDA 11.4, TensorRT 8.5.2.2, OpenCV 4.5.4 **with GStreamer**, no DeepStream, no camera.
-- Do **not** `pip install opencv-python`, `tensorflow`, `onnxruntime`, or `uniface`.
+- `pip install uniface`, `opencv-python`, TensorFlow, Torch, or ONNX Runtime
+- Call `nvpmodel` / `jetson_clocks` from the app
+- Treat YouTube ROI yaml as vehicle calibration
+
+## Layout
+
+```
+dms/                  runtime (python -m dms.app)
+configs/              default, production, systemd-lab, per-clip replay
+deploy/               dms.service, setup_jetson.sh, logrotate
+engines/              ONNX + TRT (gitignored except MANIFEST.json)
+scripts/              fetch_onnx, build_engines, run_all_replay, calibrate_forward
+tests/                pytest (CPU) + tests/replay/ (mp4 gitignored)
+docs/                 design, readiness, status
+tools/export/         off-box ONNX notes
+```
+
+Entry point is **`python3.8 -m dms.app`**. The old `main.py` / `models/` / `config/` stubs were deleted in Phase 0.
 
 ## Setup
 
@@ -17,43 +32,60 @@ python3.8 -m venv --system-site-packages .venv
 . .venv/bin/activate
 pip install -U pip wheel
 pip install -r requirements.txt
-# optional: pip install 'cuda-python>=11.4,<12' || true   # ctypes cudart is the fallback
+# optional: pip install 'cuda-python>=11.4,<12' || true
 ```
 
-```bash
-python -m dms.app --help
-python -m dms.app --config configs/default.yaml --max-frames 30
-# if no mp4 yet, use the test source:
-#   edit source.type: test   or
-python -c "from dms.config.schema import load_config; c=load_config('configs/default.yaml'); c.source.type='test'"
-```
-
-Fetch models (network):
+System site-packages must provide `cv2` (GStreamer build), `tensorrt`, `gi`.
 
 ```bash
 bash scripts/fetch_onnx.sh
-python scripts/build_engines.py
+PYTHONPATH=. python3.8 scripts/build_engines.py
+PYTHONPATH=. python3.8 -m pytest -q
+PYTHONPATH=. python3.8 -m dms.app --config configs/testsrc.yaml --max-frames 30
+PYTHONPATH=. python3.8 -m dms.app --config configs/default.yaml --detect --max-frames 60
 ```
 
-Tests (CPU, no TRT required):
+Health while running: `http://127.0.0.1:8088/healthz`. Lab alerts append to `data/events.jsonl`.
+
+## Replay
+
+Clips and ROI notes: [`tests/replay/CLIPS.md`](tests/replay/CLIPS.md). mp4 is gitignored.
 
 ```bash
-PYTHONPATH=. pytest -q
+PYTHONPATH=. python3.8 scripts/run_all_replay.py              # until EOS
+PYTHONPATH=. python3.8 scripts/run_all_replay.py --max-frames 60
+# resume a folder, skip finished, wait if RAM is tight:
+PYTHONPATH=. python3.8 scripts/run_all_replay.py \
+  --run-dir tests/replay/runs/<stamp> --skip-complete --min-avail-mb 1800
 ```
 
-## systemd (headless)
-
-`READY=1` is sent after engines load even if CSI is missing (`camera.fail_fatal: false`). Health: `http://127.0.0.1:8088/healthz`.
+Forward-look calibration (writes gitignored `configs/vehicle.yaml`, merged only into `default.yaml`):
 
 ```bash
-sudo bash deploy/setup_jetson.sh          # does not change nvpmodel unless --apply-power
-# sudo bash deploy/setup_jetson.sh --apply-power
+PYTHONPATH=. python3.8 scripts/calibrate_forward.py --config configs/default.yaml
+```
+
+## systemd (not enabled on this board)
+
+```bash
+sudo bash deploy/setup_jetson.sh --lab       # videotestsrc until CSI exists
+# sudo bash deploy/setup_jetson.sh --vehicle # configs/production.yaml (csi)
 sudo systemctl enable --now dms.service
 curl -s http://127.0.0.1:8088/healthz
 ```
 
-Unit: `deploy/dms.service` (`Type=notify`, `TimeoutStartSec=90`, `WatchdogSec=30`, `User=dms`). Do not call `nvpmodel` / `jetson_clocks` from the app.
+`--apply-power` is the only way the script runs `nvpmodel -m 8`. `jetson_clocks` is never automatic.
 
-## UniFace
+## Config map
 
-[yakhyo/uniface](https://github.com/yakhyo/uniface) is the **ONNX + 106-pt index cookbook**. Runtime is TensorRT, not UniFace/ORT. Face detector is **SCRFD-500m** (MIT), not YOLOv8-face (GPL).
+| File | Use |
+| --- | --- |
+| `configs/default.yaml` | Lab file replay (`day_driver.mp4`), `source.dev: true` |
+| `configs/testsrc.yaml` | `videotestsrc`, no TRT unless `--detect` |
+| `configs/systemd-lab.yaml` | Headless unit until CSI; `require_engines: true` |
+| `configs/production.yaml` | Vehicle CSI; contour EAR 0.50 / 0.75 |
+| `configs/<clip>.yaml` | Per-video driver ROI (see CLIPS.md) |
+
+## Models
+
+UniFace is the **ONNX + 106-pt cookbook**, never a runtime. Detector: **SCRFD-500m** (MIT). Landmarks: **2d106det**. Hashes in `engines/MANIFEST.json` are checked at load (wrong TRT version or engine sha256 → exit 1). Phone YOLO is off (AGPL). Details: [`tools/export/README.md`](tools/export/README.md).
