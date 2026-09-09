@@ -1,9 +1,9 @@
 # DMS — Driver Monitoring System (Jetson Xavier NX)
 
 Production-oriented DMS for **Jetson Xavier NX / JetPack 5.1.6 / TensorRT 8.5**.
-Design: [`docs/production-dms-design.md`](docs/production-dms-design.md).
 
-Phase 1 (this tree): package, YAML config, GStreamer **file/test** capture, TensorRT wrapper, UniFace-pinned ONNX hashes. Not a full drowsiness pipeline yet.
+- Architecture: [`docs/production-dms-design.md`](docs/production-dms-design.md)
+- Status vs a vehicle freeze: [`docs/production-readiness.md`](docs/production-readiness.md) — **not production-ready yet** (replay lab + systemd unit file).
 
 ## This board
 
