@@ -6,7 +6,7 @@
 | **Board** | Jetson Xavier NX Dev Kit, JetPack 5.1.6, TensorRT 8.5.2.2, 6.7 GiB RAM, `MODE_20W_6CORE` |
 | **Architecture** | [`docs/production-dms-design.md`](production-dms-design.md) (rev 5) — still the v1 contract |
 | **This document** | Gap analysis of the *running tree* vs that contract, and the work to reach a vehicle-engineering freeze |
-| **Verdict** | **Not production-ready.** It is a working **replay lab** with a systemd *unit file*. Camera absence is one gap among several that would fail a vehicle image. |
+| **Verdict** | **Not production-ready.** Replay lab + Phase 0 packaging (JSONL, MANIFEST, leftover delete, lab systemd unit). Camera absence is one gap among several that would fail a vehicle image. |
 
 **Production-level** here means the design v1 freeze, **not** UNECE R171 / Euro NCAP certification (explicit non-goal). Freeze gates from the design:
 
@@ -130,7 +130,7 @@ Work is ordered so each slice is reviewable and leaves the board bootable. Do **
 | `dms/io/events.py`: always append JSONL (`/var/lib/dms/events.jsonl` in prod, `data/events.jsonl` in lab) | Restart preserves file; one line per alert edge |
 | Load-time MANIFEST: TRT version + engine sha256 | Wrong TRT → exit 1 `ENGINE_VERSION_MISMATCH` before READY |
 | Fix `production.yaml` `ear_closed: 0.50`, `ear_open_median: 0.75` | Matches contour EAR |
-| `setup_jetson.sh` on this board with **file** `source.dev: true` until CSI exists | `systemctl start dms`; `curl 127.0.0.1:8088/healthz` → `ok`, `dev_replay: true` |
+| `setup_jetson.sh --lab` (default) installs `configs/systemd-lab.yaml` (test source) | Needs root. This board: `sudo` requires a password — unit **not** enabled here. Run: `sudo bash deploy/setup_jetson.sh --lab` |
 | Document CLOCKS_LOW only when TRT is loaded and clock < 300 | No spam on videotestsrc |
 
 **Exit:** `systemctl status dms` active; JSONL growing on `testsrc` or looped mp4; journald JSON logs.

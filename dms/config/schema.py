@@ -102,6 +102,11 @@ class ClipsConfig(BaseModel):
     ffmpeg: str = "/usr/bin/ffmpeg"
 
 
+class EventsConfig(BaseModel):
+    enabled: bool = True
+    path: str = ""  # empty → data/events.jsonl if source.dev else /var/lib/dms/events.jsonl
+
+
 class DisplayConfig(BaseModel):
     enabled: bool = False
 
@@ -139,6 +144,7 @@ class AppConfig(BaseModel):
     state: StateConfig = StateConfig()
     alerts: AlertsConfig = AlertsConfig()
     clips: ClipsConfig = ClipsConfig()
+    events: EventsConfig = EventsConfig()
     display: DisplayConfig = DisplayConfig()
     privacy: PrivacyConfig = PrivacyConfig()
     health: HealthConfig = HealthConfig()

@@ -11,6 +11,7 @@ engines/*.build.log
 !engines/MANIFEST.json
 models/*/weights
 data/events.jsonl
+!data/.gitkeep
 *.mp4
 configs/vehicle.yaml
 tests/replay/*.jpg

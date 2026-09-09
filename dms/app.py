@@ -9,11 +9,13 @@ import time
 
 from dms.capture.gst_source import GstSource
 from dms.config.schema import load_config
+from dms.io.events import EventLog, default_events_path
 from dms.io.gpio_alert import GpioAlert
 from dms.io.health import HealthServer, HealthState
 from dms.io.sd_notify import sd_notify
 from dms.io.thermal import gpu_clock_mhz, ram_used_mb, read_temps, thermal_throttle
 from dms.jsonlog import setup_logging
+from dms.runtime.manifest import ManifestError, check_runtime
 
 log = logging.getLogger("dms.app")
 _STOP = False
@@ -57,10 +59,14 @@ def main(argv: list | None = None) -> int:
             log.error("replay file missing: %s", cfg.source.path)
             return 2
 
-    if cfg.require_engines:
-        missing = [p for p in (cfg.models.face.engine, cfg.models.landmarks.engine) if p and not os.path.isfile(p)]
-        if missing:
-            log.error("ENGINE_FAIL missing %s", missing)
+    if args.detect or cfg.require_engines:
+        try:
+            check_runtime(
+                [cfg.models.face.engine, cfg.models.landmarks.engine],
+                require_hash=cfg.require_engines,
+            )
+        except ManifestError as exc:
+            log.error("%s", exc)
             return 1
 
     signal.signal(signal.SIGINT, _handle_stop)
@@ -140,10 +146,11 @@ def main(argv: list | None = None) -> int:
         d = os.path.dirname(args.save_video)
         if d:
             os.makedirs(d, exist_ok=True)
-    if args.events:
-        d = os.path.dirname(args.events)
-        if d:
-            os.makedirs(d, exist_ok=True)
+
+    event_log = None
+    if cfg.events.enabled or args.events:
+        ev_path = args.events or default_events_path(cfg.source.dev, cfg.events.path)
+        event_log = EventLog(ev_path)
 
     sd_notify("READY=1")
     t0 = time.monotonic()
@@ -159,7 +166,6 @@ def main(argv: list | None = None) -> int:
     tracker = IouTracker() if args.detect else None
     monitor = DriverMonitor(cfg) if args.detect else None
     calib_yaw, calib_pitch, calib_ear = [], [], []
-    event_fh = open(args.events, "a") if args.events else None
     while not _STOP:
         frame = src.read(timeout_s=1.0)
         if frame is None:
@@ -223,22 +229,8 @@ def main(argv: list | None = None) -> int:
                 )
                 for ev in evs:
                     log.info("ALERT %s %s %s", ev.edge, ev.type.value, ev.severity.value)
-                    if event_fh is not None:
-                        import json
-
-                        event_fh.write(
-                            json.dumps(
-                                {
-                                    "t": ev.t_mono_s,
-                                    "type": ev.type.value,
-                                    "severity": ev.severity.value,
-                                    "edge": ev.edge,
-                                    "track_id": ev.track_id,
-                                    "extra": ev.extra,
-                                }
-                            )
-                            + "\n"
-                        )
+                    if event_log is not None:
+                        event_log.write_alert(ev)
                 alert_names = ["%s:%s" % (k.value, v.value) for k, v in monitor.active.items()]
                 if monitor.yaw_ewma is not None:
                     yaw_rel = angdiff(monitor.yaw_ewma, cfg.forward_zero.yaw)
@@ -301,7 +293,7 @@ def main(argv: list | None = None) -> int:
                 thermal_on = True
             if not hot:
                 thermal_on = False
-            if clock is not None and clock < 300 and not clocks_low_logged:
+            if detector is not None and clock is not None and clock < 300 and not clocks_low_logged:
                 log.warning("CLOCKS_LOW gpu_clock_mhz=%s", clock)
                 clocks_low_logged = True
             with health.lock:
@@ -330,8 +322,8 @@ def main(argv: list | None = None) -> int:
         os.makedirs(os.path.dirname(args.save_preview) or ".", exist_ok=True)
         cv2.imwrite(args.save_preview, preview)
         log.info("wrote preview %s", args.save_preview)
-    if event_fh is not None:
-        event_fh.close()
+    if event_log is not None:
+        event_log.close()
     if args.calibrate_forward and calib_yaw:
         import yaml
 

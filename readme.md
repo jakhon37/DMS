@@ -3,7 +3,7 @@
 Production-oriented DMS for **Jetson Xavier NX / JetPack 5.1.6 / TensorRT 8.5**.
 
 - Architecture: [`docs/production-dms-design.md`](docs/production-dms-design.md)
-- Status vs a vehicle freeze: [`docs/production-readiness.md`](docs/production-readiness.md) — **not production-ready yet** (replay lab + systemd unit file).
+- Status vs a vehicle freeze: [`docs/production-readiness.md`](docs/production-readiness.md) — **not production-ready yet**. Phase 0: packaging, JSONL, MANIFEST, leftover delete.
 
 ## This board
 

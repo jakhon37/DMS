@@ -16,6 +16,8 @@ import time
 from typing import List, Optional, TextIO
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 TRTEXEC = os.environ.get("TRTEXEC", "/usr/src/tensorrt/bin/trtexec")
 
 # trtexec is chatty; these lines are the useful milestones.
@@ -148,6 +150,12 @@ def build(
         print("[%s] last 30 log lines:" % _ts(), file=sys.stderr)
         sys.stderr.write("".join(text.splitlines(True)[-30:]))
         raise SystemExit("trtexec failed for %s" % onnx)
+    try:
+        from dms.runtime.manifest import record_engine_sha256
+
+        record_engine_sha256(engine)
+    except Exception as exc:
+        print("[%s] WARN: MANIFEST update failed: %s" % (_ts(), exc))
     frac = parse_dla_fraction(text)
     print("[%s] %s | dla_layer_fraction=%.3f" % (_ts(), label, frac))
     if dla is not None and frac < 0.80:

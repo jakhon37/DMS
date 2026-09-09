@@ -1,5 +1,7 @@
+# Headless lab unit until CSI exists: videotestsrc, engines required, JSONL on disk.
+# Installed to /etc/dms/default.yaml by: sudo bash deploy/setup_jetson.sh --lab
 source:
-  type: file
+  type: test
   path: tests/replay/day_driver.mp4
   dev: true
   device: /dev/video0
@@ -65,7 +67,7 @@ privacy:
   telemetry: false
 events:
   enabled: true
-  path: data/events.jsonl
+  path: /var/lib/dms/events.jsonl
 health:
   bind: 127.0.0.1
   port: 8088
@@ -79,4 +81,4 @@ forward_zero:
   pitch: 0.0
   roll: 0.0
 seat: lhd
-require_engines: false
+require_engines: true

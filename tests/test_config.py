@@ -43,6 +43,9 @@ def test_production_yaml_loads():
     assert cfg.require_engines is True
     assert cfg.health.port == 8088
     assert cfg.camera.fail_fatal is False
+    assert cfg.state.ear_closed == 0.50
+    assert cfg.state.ear_open_median == 0.75
+    assert cfg.events.path == "/var/lib/dms/events.jsonl"
 
 
 def test_unknown_key_rejected(tmp_path):

@@ -27,6 +27,8 @@ def test_setup_jetson_script_syntax():
     assert "--apply-power" in text
     assert "useradd" in text
     assert "configs/production.yaml" in text
+    assert "configs/systemd-lab.yaml" in text
+    assert "--lab" in text
     assert "/etc/dms/default.yaml" in text
     assert "jetson_clocks is NEVER auto" in text or "never auto" in text.lower()
 

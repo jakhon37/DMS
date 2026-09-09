@@ -26,5 +26,18 @@
       "output_names": null
     }
   },
-  "engines": {}
+  "engines": {
+    "scrfd_500m_640_fp16_gpu": {
+      "file": "scrfd_500m_640_fp16_gpu.engine",
+      "device": "gpu",
+      "sha256": "be486486895ff17b1668fd36b2a854acf96d7617405147628045a31c6cc672e2",
+      "bytes": 1770911
+    },
+    "2d106det_192_fp16_gpu": {
+      "file": "2d106det_192_fp16_gpu.engine",
+      "device": "gpu",
+      "sha256": "1083ca5819dd919d033eeb2fc972a1b1ac76d9276b0a97f11ddc97fed687bab7",
+      "bytes": 3781245
+    }
+  }
 }
