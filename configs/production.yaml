@@ -29,7 +29,10 @@ capture:
   full_size: [1280, 720]
   # The detector input this profile expects; the SCRFD engine below is the
   # authority and the app logs LETTERBOX_MISMATCH if they disagree.
-  letterbox: [512, 512]
+  # tests/test_config.py::test_capture_letterbox_describes_the_detector_the_profile_ships
+  # keeps the two in step against the MANIFEST input shape, so a future engine
+  # swap cannot leave this key behind.
+  letterbox: [640, 640]
   letterbox_pad_value: 0
   queue_depth: 1
 camera:
@@ -44,28 +47,34 @@ camera:
   starved_for_s: 10.0
 models:
   face:
-    # SCRFD-512, not 640. MEASURED on this board 2026-09-13 (nvpmodel 8, 400
-    # replay frames, back to back on an otherwise idle board, all nine engines):
-    #   default.yaml  640: e2e p95 71.63 ms FAIL @18.2 FPS -> 512: 63.08 ms PASS @19.4
-    #   minivan.yaml  640: e2e p95 73.56 ms FAIL @17.9 FPS -> 512: 61.90 ms PASS @20.6
-    # perf.gate_e2e_p95_ms is 66.0, so the 640 engine cannot pass the gate this
-    # profile declares. 512 is the only change that brings the shipped pipeline
-    # inside it without removing a model. The tail is close to the limit: a
-    # second heavy process on the six CPU cores adds 5-8 ms to the p95 and the
-    # gate fails again - the app now reports that instead of hiding it.
-    # It is a REAL, ACCEPTED recall degrade on small far faces, not a free win.
-    # Measured over the 9 replay clips in tests/replay (1986 frames, conf 0.5),
-    # by running ScrfdDetector with each engine and comparing per frame:
-    #   * frames with a face inside driver_roi: 1444 (640) -> 1421 (512), -1.6%.
-    #     Worst: day_driver -12/155 (-7.7%), rear_end_accident -9/160 (-5.6%).
-    #     minivan, red_car_crash and family_vacation_crash lose nothing.
-    #   * driver-box agreement where both find one: mean IoU 0.77-0.95 per clip.
-    #   * all detections: 3585 -> 3379. 82% of what 512 drops is under 60 px wide
-    #     - background/passenger faces on the dashcam montage, not the driver,
-    #     whose box is 65-146 px wide in these clips.
-    # If your cabin puts the driver's face under ~60 px wide, use the 640 engine
-    # and raise perf.gate_e2e_p95_ms to a number you have actually measured.
-    engine: engines/scrfd_500m_512_fp16_gpu.engine
+    # SCRFD-640. The 512 engine was adopted on 2026-09-13 to buy latency and
+    # REVERTED the same day: it did not reliably buy the pass it was made for,
+    # and it cost real detection quality. Both halves were re-measured; the
+    # tables live in docs/performance.md section 7 and are NOT duplicated here,
+    # because the duplicated version of this comment went stale in twelve files
+    # at once. The short version, all measured on this board:
+    #   * quality, all 9 replay clips (16,451 frames, conf 0.5, driver_roi
+    #     [0,0,0.65,1.0]): frames with a face in the driver ROI 8723 (640) ->
+    #     8486 (512), -2.7% overall and -15.8% on day_driver (1105 -> 930).
+    #     98% of what 512 drops on day_driver is >= 60 px wide, median 75 px:
+    #     that is the driver at medium range, not a background face.
+    #   * behaviour: day_driver driver_changed enter/exit 2 (640) -> 10 (512)
+    #     over the same 300 frames, against a golden band of [1, 3]. Three of
+    #     the nine golden fixtures went red on 512.
+    #   * latency: NEITHER engine meets perf.gate_e2e_p95_ms on this board, so
+    #     the swap did not buy the pass it was made for. Paired A/B, 6 pairs of
+    #     300 frames alternating which engine ran first (sequential sweeps on
+    #     this board are not comparable - two of them disagreed on the SIGN of
+    #     the difference): 640 e2e p95 median 79.55 ms, 512 74.39 ms, and
+    #     0 of 6 runs passed on EITHER engine. The 512 is worth 5.4 ms of p50;
+    #     the gap to the gate is about 13 ms. Per-profile run-to-run spread is
+    #     6.5-33 ms, wider than the margin the gate is judged by, so a single
+    #     PASS is not evidence of a pass. The miss is REPORTED (PERF_GATE line,
+    #     /healthz note and e2e_p95_limit, dms_perf_gate_* gauges) and declared
+    #     in tests/test_config.py::KNOWN_GATE_MISSES, not designed around.
+    # Need the low-latency point instead? configs/lowlatency.yaml carries the
+    # 512 engine with the same quality cost stated in its own header.
+    engine: engines/scrfd_500m_640_fp16_gpu.engine
     conf: 0.5
     iou: 0.4
     device: gpu

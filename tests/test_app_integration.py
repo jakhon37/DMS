@@ -7,12 +7,23 @@ Three layers, so that most of the value is available with no GPU:
 2. Structural tests over the golden replay fixtures - that every clip in
    ``tests/replay`` has a golden, that the goldens are well formed, and that
    they are internally consistent.
-3. ``@pytest.mark.board`` tests that actually execute the pipeline.  They are
-   skipped unless ``DMS_REPLAY_TESTS=1`` is set, because they need the GPU and
-   the whole GPU is shared with other work on this board.  Run them as::
+3. ``@pytest.mark.board`` tests that actually execute the pipeline, including
+   the golden replay comparison itself - one test per clip, which is the gate
+   that fails on a detection-quality regression.  They are skipped unless
+   ``DMS_REPLAY_TESTS=1`` is set, because they need the GPU and the whole GPU is
+   shared with other work on this board.  Run them as::
 
        DMS_REPLAY_TESTS=1 flock /tmp/jetson-gpu.lock -c \\
            "PYTHONPATH=. ./.venv/bin/python -m pytest -q tests/test_app_integration.py"
+
+   Layer 2 is deliberately not just structural any more.  A green suite used to
+   be compatible with a 15.8% drop in driver-face recall, because the only thing
+   that measured recall was ``tests/replay/golden/run_golden.py``, which pytest
+   never invoked: the SCRFD-640 -> 512 swap put three of the nine goldens into
+   regression and the suite stayed green.  ``test_golden_detector_matches_the_
+   profile_today`` closes that with no GPU and no clip, by comparing the
+   detector each golden was RECORDED against with the detector its profile
+   selects now; a swap is then a red suite everywhere, not only on the board.
 """
 from __future__ import annotations
 
@@ -243,14 +254,34 @@ def test_every_clip_has_a_golden():
 GOLDENS = sorted(glob.glob(os.path.join(GOLDEN_DIR, "*.json")))
 
 
+def _run_golden_module():
+    """Import ``tests/replay/golden/run_golden.py`` as a module."""
+    sys.path.insert(0, GOLDEN_DIR)
+    try:
+        import run_golden
+
+        return run_golden
+    finally:
+        sys.path.pop(0)
+
+
+#: ``[(stem, config, max_frames), ...]`` - the clip set the harness checks.
+GOLDEN_CLIPS = _run_golden_module().CLIPS
+
+
 @pytest.mark.skipif(not GOLDENS, reason="no goldens recorded")
 @pytest.mark.parametrize("path", GOLDENS, ids=[os.path.basename(p) for p in GOLDENS])
 def test_golden_is_well_formed(path):
     with open(path) as f:
         g = json.load(f)
-    assert g["schema"] == "dms.replay_golden/2"
+    assert g["schema"] == "dms.replay_golden/3"
     assert os.path.isfile(os.path.join(ROOT, g["clip"])), g["clip"]
     assert os.path.isfile(os.path.join(ROOT, g["config"])), g["config"]
+    # Schema 3: a golden that does not say which detector produced it cannot be
+    # checked against the profile, which is the whole point of the field.
+    engine = g.get("detector_engine")
+    assert engine, "golden has no detector_engine (re-record it)"
+    assert os.path.isfile(os.path.join(ROOT, engine)), engine
     assert g["frames"] > 0
     assert g["frames"] <= g["max_frames"]
     lo, hi = g["face_hits"]
@@ -290,6 +321,59 @@ def test_goldens_record_the_uncalibrated_posture():
     assert not offenders, (
         "gaze-derived alerts in a golden recorded from an uncalibrated profile: %s" % offenders
     )
+
+
+@pytest.mark.skipif(not GOLDENS, reason="no goldens recorded")
+@pytest.mark.parametrize("path", GOLDENS, ids=[os.path.basename(p) for p in GOLDENS])
+def test_golden_detector_matches_the_profile_today(path):
+    """A golden is a baseline for ONE detector. Swapping it invalidates the band.
+
+    This is the test the SCRFD-512 regression walked past.  On 2026-09-13 all
+    twelve profiles were repointed from ``scrfd_500m_640_fp16_gpu.engine`` to
+    ``scrfd_500m_512_fp16_gpu.engine`` to buy latency.  Measured consequence on
+    ``day_driver``: driver-ROI face-hit frames 1105 -> 930 (-15.8%) and
+    ``driver_changed`` enter/exit 2 -> 10 against a golden band of [1, 3].
+    Three of the nine goldens went red - and the pytest suite stayed green,
+    because nothing in it ran the comparison.
+
+    Needs no GPU, no clip and no engine file loaded: it reads the golden and the
+    profile.  So the swap is red on a laptop, in CI, and on the board, within a
+    second of being made.  If the new detector is genuinely wanted, re-record
+    the goldens deliberately (``run_golden.py --record``) and read the diff.
+    """
+    with open(path) as f:
+        g = json.load(f)
+    recorded = g.get("detector_engine")
+    if not recorded:
+        pytest.fail("golden %s has no detector_engine" % os.path.basename(path))
+    cfg = load_config(os.path.join(ROOT, g["config"]))
+    assert cfg.models.face.engine == recorded, (
+        "%s was recorded against %s but %s now selects %s. Either put the "
+        "detector back or re-record the golden on purpose - the recorded alert "
+        "bands and face-hit band do not carry across a detector swap."
+        % (os.path.basename(path), recorded, g["config"], cfg.models.face.engine)
+    )
+
+
+def test_golden_compare_rejects_a_detector_swap():
+    """The harness's own guard, checked without running anything."""
+    run_golden = _run_golden_module()
+    bad = run_golden.compare(
+        "x",
+        {
+            "frames": 10,
+            "face_hits": [0, 5],
+            "alerts": {},
+            "detector_engine": "engines/scrfd_500m_640_fp16_gpu.engine",
+        },
+        {
+            "frames": 10,
+            "face_hits": 3,
+            "alerts": {},
+            "detector_engine": "engines/scrfd_500m_512_fp16_gpu.engine",
+        },
+    )
+    assert any("now selects" in b for b in bad), bad
 
 
 def test_golden_band_helper():
@@ -343,17 +427,37 @@ def test_full_pipeline_smoke(tmp_path):
 
 @BOARD
 @NEEDS_BOARD
-@pytest.mark.skipif(not GOLDENS, reason="no goldens recorded")
-def test_golden_replay_day_driver():
+@pytest.mark.parametrize("stem", [c[0] for c in GOLDEN_CLIPS])
+def test_golden_replay(stem):
+    """Replay one clip and compare every count against its recorded band.
+
+    THE detection-quality gate.  Before this existed only ``day_driver`` was
+    checked from pytest, and only if somebody thought to set the env var; the
+    other eight clips were checked by hand or not at all, which is how three
+    goldens sat red through a fix round.  One test per clip so a failure names
+    the clip, and so a missing clip skips instead of failing the set.
+
+    Each clip is a ~30 s process.  Hold the GPU mutex around the whole run:
+
+        flock /tmp/jetson-gpu.lock -c "DMS_REPLAY_TESTS=1 PYTHONPATH=. \\
+            ./.venv/bin/python -m pytest -q tests/test_app_integration.py"
+    """
+    golden = os.path.join(GOLDEN_DIR, "%s.json" % stem)
+    clip = os.path.join(ROOT, "tests", "replay", "%s.mp4" % stem)
+    if not os.path.isfile(clip):
+        pytest.skip("clip %s not checked out" % os.path.basename(clip))
+    if not os.path.isfile(golden):
+        pytest.skip("no golden for %s (run run_golden.py --record)" % stem)
     runner = os.path.join(GOLDEN_DIR, "run_golden.py")
     proc = subprocess.run(
-        [sys.executable, runner, "--only", "day_driver"],
+        [sys.executable, runner, "--only", stem],
         cwd=ROOT,
         env=dict(os.environ, PYTHONPATH=ROOT),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    assert proc.returncode == 0, proc.stdout.decode("utf-8", "replace")
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
 
 
 def _run_app(argv):

@@ -60,12 +60,23 @@ profile came to miss its own gate by 6-12 ms while ``/healthz`` reported
 ``ok: true, degraded: false``.  The verdict reaches an operator three ways: the
 ``dms_perf_gate_*`` gauges on ``/metrics``, a ``perf gate PASS/FAIL ...`` note on
 ``/healthz`` (with ``degraded: true`` once a decided miss has persisted for
-:data:`GATE_DEGRADE_REFRESHES` refreshes), and one ``PERF_GATE PASS|FAIL|
-UNDECIDED`` line at shutdown.  MEASURED, one process alone on this board: the
-shipped SCRFD-512 profiles run e2e p95 59.7-65.4 ms; the same profiles on the
-640 engine ran 71.4-73.6 ms and missed.  A second heavy tenant on the six CPU
-cores adds 5-8 ms to the tail, which is enough to fail the gate - and the point
-of this section is that the unit now says so instead of reporting itself well.
+:data:`GATE_DEGRADE_REFRESHES` refreshes), ``latency_ms.gate_limit_p95``
+alongside ``latency_ms.e2e_p95`` in the same ``/healthz`` body so the miss is
+machine-readable on the first refresh rather than after the degrade dwell, and
+one ``PERF_GATE PASS|FAIL|UNDECIDED`` line at shutdown.  All four are derived
+from :func:`_gate_verdict`, so they cannot disagree - they used to: a short run
+printed ``PERF_GATE UNDECIDED`` and ``wrote ... gate=FAIL`` about the same
+window, because ``gate['pass']`` is False for an unjudgeable window as well as
+for a missed one.
+
+MEASURED on this board 2026-09-13, 300 replay frames, n=3 per profile, one
+process at a time under the GPU mutex: the gate is MISSED by the shipped
+profiles on real clips.  ``default.yaml`` runs e2e p95 median 79.6 ms against
+its own 66.0 ms limit on the shipped SCRFD-640 detector, and 78.5 ms on the
+SCRFD-512 engine that was briefly shipped to buy the pass.  Run-to-run spread
+is 7-16 ms, wider than the margin the gate is judged by, so a single PASS is
+not evidence of a pass.  The app does not round that away: it reports the miss
+and the operator decides.  See docs/performance.md section 7.
 
 Units: seconds for time, milliseconds for latency, MiB for memory, degrees for
 angles.
@@ -253,6 +264,20 @@ def _percentile_map(budget: LatencyBudget, infer: RollingStats) -> Dict[str, flo
         out["e2e_p50"] = round(e2e.p50, 1)
         out["e2e_p95"] = round(e2e.p95, 1)
         out["e2e_p99"] = round(e2e.p99, 1)
+        # The limit travels with the measurement.  ``/healthz`` has no
+        # first-class ``perf_gate`` object (that belongs in dms/io/health.py,
+        # which this workstream does not own), so without this a scraper sees
+        # ``e2e_p95: 79.6`` and has no way to know it is a miss until the
+        # 10 s degrade dwell flips ``degraded``.  Emitted only once there is
+        # an e2e sample, so an empty window stays an empty map.
+        #
+        # Named ``gate_limit_p95`` and not ``e2e_p95_limit`` because
+        # ``HealthState.publish_metrics`` splits every key in this map into
+        # ``dms_stage_latency_ms{stage=...,quantile=...}``: the latter spells
+        # itself as a pipeline STAGE called "e2e_p95_limit", which is not a
+        # stage and does not take 66 ms.  This spelling yields
+        # ``{stage="gate_limit",quantile="p95"}``, which says what it is.
+        out["gate_limit_p95"] = round(float(budget.gate_e2e_p95_ms), 1)
     if len(infer):
         out["infer_p50"] = round(infer.p50, 1)
         out["infer_p95"] = round(infer.p95, 1)
@@ -1472,19 +1497,24 @@ class DmsApp(object):
             self.hsv.stop()
 
     def _log_gate_verdict(self) -> None:
-        """The end-of-run PASS/FAIL line. Always logged, artifact or not."""
+        """The end-of-run PASS/FAIL line. Always logged, artifact or not.
+
+        The trailing parenthesis names WHICH half of the gate decided the
+        verdict and by how much.  ``FAIL`` on its own sent readers to the
+        latency numbers when the miss could equally have been memory, and sent
+        nobody to the fact that a 300-frame observation on this board has a
+        7-16 ms spread - so a PASS reports its margin too, and a margin thinner
+        than that spread is not a pass anybody should plan on.
+        """
         if self.budget is None:
             return
         self.budget.observe_rss(peak_rss_mb())
         gate = self.budget.gate()
-        decided = int(gate.get("e2e_samples") or 0) >= GATE_MIN_SAMPLES
-        verdict = "PASS" if gate["pass"] else "FAIL"
-        if not decided:
-            verdict = "UNDECIDED"
+        verdict, why = _gate_verdict(gate)
         level = log.info if verdict == "PASS" else log.warning
         level(
             "PERF_GATE %s e2e_p95=%s ms limit=%s ms peak_rss=%s MiB limit=%s MiB "
-            "samples=%s fps=%s config=%s",
+            "samples=%s fps=%s config=%s (%s)",
             verdict,
             gate["e2e_p95_ms"],
             gate["e2e_p95_limit_ms"],
@@ -1493,6 +1523,7 @@ class DmsApp(object):
             gate["e2e_samples"],
             gate["fps_mean"],
             os.path.basename(self.args.config),
+            why,
         )
 
     def _write_budget(self) -> None:
@@ -1503,12 +1534,17 @@ class DmsApp(object):
             self.budget.observe_rss(peak_rss_mb())
             path = self.budget.write(out)
             gate = self.budget.gate()
+            # Same three-valued verdict as the PERF_GATE line.  This line used
+            # to be two-valued and called an UNDECIDED window "FAIL", so the
+            # two lines of a short run contradicted each other.
+            verdict, why = _gate_verdict(gate)
             log.info(
-                "wrote %s gate=%s e2e_p95=%s ms peak_rss=%s MiB",
+                "wrote %s gate=%s e2e_p95=%s ms peak_rss=%s MiB (%s)",
                 path,
-                "PASS" if gate["pass"] else "FAIL",
+                verdict,
                 gate["e2e_p95_ms"],
                 gate["peak_rss_mb"],
+                why,
             )
         except OSError as exc:
             log.error("could not write the latency budget to %s: %s", out, exc)
@@ -1544,19 +1580,71 @@ class DmsApp(object):
 # --------------------------------------------------------------------- extras
 
 
+def _gate_verdict(gate: Dict[str, Any]) -> Tuple[str, str]:
+    """``(PASS|FAIL|UNDECIDED, why)`` for one :meth:`LatencyBudget.gate` dict.
+
+    The single source of the verdict, so the shutdown ``PERF_GATE`` line, the
+    ``latency_budget.json`` line and the ``/healthz`` note cannot disagree.
+
+    Two distinctions this makes that ``gate['pass']`` does not:
+
+    * A window with fewer than :data:`GATE_MIN_SAMPLES` e2e samples is
+      UNDECIDED, not FAIL.  ``gate['pass']`` is False for both, which is how a
+      20-frame run came to print ``PERF_GATE UNDECIDED`` and, in the next line,
+      ``gate=FAIL``.
+    * ``why`` names the half that decided it and the signed margin.  On a miss
+      that is the difference between "look at latency" and "look at memory"; on
+      a pass it is the difference between a real pass and a 0.4 ms margin on a
+      board whose run-to-run spread is 7-16 ms.
+    """
+    if int(gate.get("e2e_samples") or 0) < GATE_MIN_SAMPLES:
+        return "UNDECIDED", "only %s of %s e2e samples, not judgeable" % (
+            gate.get("e2e_samples"),
+            GATE_MIN_SAMPLES,
+        )
+    p95 = gate.get("e2e_p95_ms")
+    limit = gate.get("e2e_p95_limit_ms")
+    over_ms = None
+    if p95 is not None and limit:
+        over_ms = float(p95) - float(limit)
+    why = []
+    if not gate.get("latency_pass"):
+        why.append(
+            "e2e p95 OVER by %.2f ms" % over_ms
+            if over_ms is not None
+            else "e2e p95 unavailable"
+        )
+    if not gate.get("rss_measured"):
+        why.append("peak RSS never measured")
+    elif not gate.get("rss_pass"):
+        why.append(
+            "peak RSS OVER by %.0f MiB"
+            % (float(gate["peak_rss_mb"]) - float(gate["peak_rss_limit_mb"]))
+        )
+    if why:
+        return "FAIL", "; ".join(why)
+    # abs(), not -over_ms: at exactly the limit -over_ms is -0.0 and formats as
+    # "-0.00 ms", which reads like a miss in the one line that must not.
+    return "PASS", "e2e p95 inside by %.2f ms" % (
+        abs(over_ms) if over_ms is not None else 0.0
+    )
+
+
 def _gate_note(gate: Dict[str, Any], degraded: bool) -> str:
     """One operator-readable line for /healthz notes describing the gate."""
-    if int(gate.get("e2e_samples") or 0) < GATE_MIN_SAMPLES:
+    verdict, why = _gate_verdict(gate)
+    if verdict == "UNDECIDED":
         return "perf gate: undecided, %s of %s e2e samples" % (
             gate.get("e2e_samples"),
             GATE_MIN_SAMPLES,
         )
-    return "perf gate %s: e2e p95 %s ms vs %s ms limit, peak rss %s vs %s MiB%s" % (
-        "PASS" if gate["pass"] else "FAIL",
+    return "perf gate %s: e2e p95 %s ms vs %s ms limit, peak rss %s vs %s MiB - %s%s" % (
+        verdict,
         gate["e2e_p95_ms"],
         gate["e2e_p95_limit_ms"],
         gate["peak_rss_mb"],
         gate["peak_rss_limit_mb"],
+        why,
         " (sustained: degraded)" if degraded else "",
     )
 

@@ -1,12 +1,14 @@
 # DMS performance on the Xavier NX
 
-**Two dates, and the difference between them matters.** Sections 3 to 12 of this
+**Three dates, and the difference between them matters.** Sections 3 to 12 of this
 document are microbenchmarks taken by `scripts/bench.py` and `scripts/run_all_replay.py`
-on **2026-09-13 morning**, against the application as it stood *then*. Section 1 and
-section 2 were re-taken from the **shipped application** on **2026-09-13 between 16:45
-and 17:10 KST**, after two of the three optimisations this document used to recommend
-were actually merged. Where a later section describes the old code path it now says
-so inline.
+on **2026-09-13 morning**, against the application as it stood *then*. Section 2 was
+re-taken from the **shipped application** on **2026-09-13 between 16:45 and 17:10 KST**.
+**Section 1 and section 7 were re-taken on 2026-09-13 evening KST**, after the SCRFD-512
+detector was reverted to SCRFD-640, and they are the only sections in this file whose
+latency numbers are **repeated measurements** (n >= 3 per profile, n = 9 on `default`,
+plus a paired A/B for the detector comparison) rather than single observations. Where a
+later section describes the old code path or a single observation it now says so inline.
 
 Nothing here is estimated, scaled from another device, or copied from a datasheet.
 Where a number is uncertain the uncertainty is stated; where something has not been
@@ -31,9 +33,20 @@ answer by more than the gate's margin.
 so in normal operation nothing checked it and an over-budget unit reported itself
 healthy.
 
+**The gate is missed.** Thirteen profiles ship; twelve of them run on this board; ten
+of those twelve miss the gate at their measured median, and the two that pass find no
+faces (section 1). That is recorded as a
+measured degrade, not designed around: the earlier attempt to get inside the gate by
+shipping a smaller detector was measured, found to buy 5.4 ms against a ~13 ms gap
+while costing 15.8% of the driver-ROI face hits on the flagship clip, and reverted
+(section 7). `tests/test_config.py` pins the gate value itself so it cannot be raised
+instead, and pins a `KNOWN_GATE_MISSES` list that must agree with the recorded
+measurements in both directions - a profile may miss the gate, it may not miss it
+silently.
+
 ---
 
-## 1. Verdict — the shipped application, measured this afternoon
+## 1. Verdict — the shipped application, re-measured this evening
 
 Two of the three fixes this document used to recommend **are now in the shipped
 path**, and the numbers below are the shipped path, not a harness:
@@ -41,7 +54,10 @@ path**, and the numbers below are the shipped path, not a harness:
 * `dms.runtime.preprocess.Letterbox` is built from the SCRFD engine's own input shape
   in `DmsApp._setup_perception` and called from `_perceive` (`dms/app.py:876`).
   `ScrfdDetector.preprocess` is now only a fallback.
-* Every profile ships `engines/scrfd_500m_512_fp16_gpu.engine`.
+* Every shipped profile ships `engines/scrfd_500m_640_fp16_gpu.engine`. The 512 engine
+  was shipped for part of 2026-09-13 and reverted the same day; the only profile that
+  still selects it is `configs/lowlatency.yaml`, which is documented as a trade and is
+  not a default. Section 7 has both halves of the measurement.
 * The cadences recommended in section 8 are shipped: `occlusion.every_n: 15`,
   `objects.every_n: 20`.
 * Per-engine CUDA event reuse in `dms/runtime/trt_engine.py` is **still not applied**
@@ -49,56 +65,81 @@ path**, and the numbers below are the shipped path, not a harness:
 * The overlay bug (`if want_overlay or not health.degraded:`) is gone — `want_overlay`
   no longer appears in `dms/app.py` at all.
 
-### The headline is the spread, not a number
+### The headline is the distribution, not a number
 
-`configs/default.yaml`, 300 frames of `day_driver.mp4`, three runs inside one hour:
+`configs/default.yaml`, 300 frames of `day_driver.mp4`, **nine runs** this evening,
+one process at a time under the GPU mutex:
 
-| run | e2e p50 | e2e p95 | FPS | verdict |
-| --- | ---: | ---: | ---: | --- |
-| first of an eleven-profile sweep | - | 79.96 (rolling window; set `health.degraded`) | - | **FAIL** |
-| standalone | 42.0 ms | **65.3 ms** | 21.3 | **PASS** by 0.7 ms |
-| standalone, immediately after, same session | 45.4 ms | **72.7 ms** | 20.3 | **FAIL** |
+```
+66.50  68.75  72.21  73.22  77.79  80.89  81.30  86.93  99.45   (e2e p95, ms)
+                            ^^^^^ median 77.79                  gate 66.00
+```
 
-**The run-to-run spread on this board is larger than the margin the gate is judged
-by.** That is the single most important performance fact in this document, and it is
-consistent with section 3: `CLOCKS_LOW` fired during the sweep at a peak GPU clock of
-**204 MHz** against an 1109 MHz ceiling. Any single number quoted for this pipeline is
-a sample from that distribution.
+**Range 32.95 ms; 0 of 9 runs passed.** The previous revision of this section quoted
+three runs spanning 65.3-79.96 ms and reported the 65.3 as a PASS "by 0.7 ms". Nine
+runs later that PASS has not reproduced once. The lesson is not that the board got
+slower - it is that **a single observation of this pipeline carries no information at
+this precision**, and a 0.7 ms margin inside a 33 ms range was never a pass.
+`CLOCKS_LOW` fires during sweeps at a peak GPU clock of 204 MHz against an 1109 MHz
+ceiling, which is the mechanism.
 
-### Every shipped profile, `dms.app`, 300 frames, one sweep
+Every latency figure in this section is therefore **a median of n runs with its
+observed range**, and the same numbers are pinned in
+`tests/test_config.py::MEASURED_E2E_P95_MS` so a profile cannot ship without one.
 
-| profile | e2e p50 | e2e p95 | FPS | peak RSS | face hits | gate |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `testsrc` | 33.1 | 34.8 | 30.0 | 1324 MiB | 0 | **PASS** |
-| `systemd-lab` | 33.2 | 35.1 | 29.6 | 1339 MiB | 0 | **PASS** |
-| `rear_end_accident` (186 fr) | 42.0 | 65.2 | 23.1 | 1368 MiB | 292 | **PASS** |
-| `default` | 42.0 | 65.3 | 21.3 | 1366 MiB | 452 | PASS / FAIL, above |
-| `bmw_rear_ended` | 43.7 | 68.1 | 19.8 | 1385 MiB | 300 | FAIL |
-| `rear_end_whiplash` | 42.2 | 68.7 | 21.8 | 1387 MiB | 540 | FAIL |
-| `red_car_crash` | 48.6 | 71.3 | 18.9 | 1363 MiB | 300 | FAIL |
-| `guy_rear_ended` | 46.3 | 76.3 | 18.9 | 1372 MiB | 300 | FAIL |
-| `family_vacation_crash` | 50.8 | 78.5 | 18.1 | 1375 MiB | 565 | FAIL |
-| `minivan` | 49.5 | 78.6 | 17.8 | 1370 MiB | 1207 | FAIL |
-| `getting_rear_ended` | 46.3 | 79.7 | 18.5 | 1370 MiB | 589 | FAIL |
-| `production` | - | - | - | - | - | **not runnable** (`csi`, no camera on this board) |
+### Every shipped profile, n = 3 runs each (n = 9 for `default` and `lowlatency`)
 
-**3 PASS, 8 FAIL, 1 unrunnable.** The two comfortable passes render a synthetic
-pattern and find zero faces, so they exercise capture, the engines and the loop but
-not the per-face cascade. Of the profiles that do real work, only the shortest clip
-passed, and by 0.8 ms.
+300 frames per run (186 for `rear_end_accident`, which is shorter), `nvpmodel` 8, one
+`dms.app` at a time under `flock /tmp/jetson-gpu.lock`.
 
-The memory half of the gate passes everywhere with 73% of headroom: **peak RSS
-1324-1387 MiB against 5000 MiB**. The FPS half passes everywhere:
-**17.8-30.0 FPS against >= 15**.
+| profile | n | e2e p95 median | observed range | spread | FPS median | peak RSS | face hits | gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `testsrc` | 3 | **35.12** | 34.78-35.75 | 0.97 | 29.5 | 1341 MiB | 0 | **PASS 3/3** |
+| `systemd-lab` | 3 | **36.50** | 35.42-39.83 | 4.41 | 28.6 | 1331 MiB | 0 | **PASS 3/3** |
+| `rear_end_whiplash` | 3 | 69.60 | 69.36-77.05 | 7.69 | 20.4 | 1385 MiB | 552 | FAIL 0/3 |
+| `lowlatency` (SCRFD-512) | 9 | 77.15 | 65.26-82.51 | 17.25 | 19.6 | 1374 MiB | 452 | FAIL 1/9 |
+| `bmw_rear_ended` | 3 | 77.12 | 66.17-79.03 | 12.86 | 18.9 | 1383 MiB | 300 | FAIL 0/3 |
+| `default` (`day_driver`) | 9 | 77.79 | 66.50-99.45 | 32.95 | 18.8 | 1386 MiB | 583 | FAIL 0/9 |
+| `minivan` | 3 | 80.38 | 65.70-98.32 | 32.62 | 17.3 | 1380 MiB | 1201 | FAIL 1/3 |
+| `getting_rear_ended` | 3 | 82.16 | 76.36-82.87 | 6.51 | 17.1 | 1382 MiB | 589 | FAIL 0/3 |
+| `family_vacation_crash` | 3 | 82.57 | 75.92-89.82 | 13.90 | 17.1 | 1372 MiB | 643 | FAIL 0/3 |
+| `red_car_crash` | 3 | 84.21 | 78.79-91.23 | 12.44 | 16.3 | 1390 MiB | 300 | FAIL 0/3 |
+| `guy_rear_ended` | 3 | 85.75 | 75.99-93.71 | 17.72 | 16.8 | 1384 MiB | 300 | FAIL 0/3 |
+| `rear_end_accident` | 3† | 85.79 | 75.06-87.38 | 12.32 | 17.4 | 1389 MiB | 305 | FAIL 0/3 |
+| `production` | — | — | — | — | — | — | — | **not runnable here**‡ |
 
-### What the two applied fixes were worth
+† 186 frames per run, not 300.
+‡ Three documents used to say `production.yaml` is unrunnable because `source.type` is
+`csi` and there is no camera. That is true but it is not the reason you hit: the
+profile loads and hash-verifies all nine engines and then exits on
+`EVENT_LOG_FATAL [Errno 13] Permission denied: '/var/lib/dms'`, before it ever touches
+the camera. Fixing the camera would not make it run; the event-log path needs root.
 
-The previous revision of this section reported `configs/default.yaml` at
-**58.6 ms p50 / 87.2 ms p95 / 16.2 FPS** with the 640 detector and no `Letterbox`.
-Today the same profile measures **42.0-45.4 ms p50 / 65.3-72.7 ms p95 at 20.3-21.3
-FPS**. That is roughly **14 ms of p50**, but the two measurements were taken in
-different board conditions, so the honest form of the claim is "the two changes are
-worth something in the neighbourhood of 10-15 ms of p50", not a delta.
+**Verdict: 2 profiles PASS, 10 FAIL, 1 unrunnable, on a shared board.** The two passes
+render a synthetic pattern and find zero faces, so they exercise capture, the engines
+and the loop but not the per-face cascade. **No profile that does real work met the
+gate at its median, on either detector.**
+
+Of the **33** individual real-clip runs on the shipped SCRFD-640 detector, **exactly
+one passed**: `minivan` at 65.70 ms, the bottom of its own 32.6 ms range, 0.3 ms
+inside the limit. The 512 detector passed 11 of its 36 - which is more, and is also
+not a comparison, because those runs were taken in different board sessions; the only
+valid engine comparison in this document is the paired A/B in section 7, where both
+engines passed 0 of 6.
+
+The memory half of the gate passes everywhere with 72% of headroom: **peak RSS
+1331-1390 MiB against 5000 MiB**. The FPS half passes everywhere: **16.3-29.5 FPS
+against >= 15**.
+
+### What the applied fixes were worth, and what they were not
+
+The revision of this section before the Letterbox work reported `configs/default.yaml`
+at **58.6 ms p50 / 87.2 ms p95 / 16.2 FPS** on the 640 detector with no `Letterbox`.
+Today, on the same 640 detector **with** `Letterbox` and the shipped cadences, nine
+runs give a p50 median of 52.25 ms and a p95 median of 77.79 ms. Both measurements are
+single-session and the board conditions differ, so the honest form is **"the changes
+are worth something, and it is not enough"**: the p95 median is still 11.8 ms outside
+the gate.
 
 ### What this section used to say, and why it was wrong
 
@@ -409,7 +450,14 @@ over the bare core pipeline.
 
 ---
 
-## 7. SCRFD 512 versus 640 - recommendation
+## 7. SCRFD 512 versus 640 - measured both ways, and reverted
+
+**Outcome: the 512 engine was shipped on 2026-09-13 afternoon and reverted the same
+evening.** The latency half of the trade reproduces. The gate it was bought for does
+not, and the accuracy half - which the morning's analysis explicitly said had not been
+done - is much larger than the "should be small" this section used to guess.
+
+### The morning microbenchmark (`scripts/bench.py`, `final-01`, unchanged)
 
 | | 640 | 512 | delta |
 |---|---:|---:|---:|
@@ -419,44 +467,99 @@ over the bare core pipeline.
 | in-pipeline `detect_gpu` p50 | 16.90 ms | 13.19 ms | **-3.71 ms** |
 | in-pipeline `detect_post` p50 | 4.35 ms | 2.98 ms | **-1.37 ms** |
 | context scratch | 6.96 MB | 6.45 MB | -0.51 MB |
-| **whole pipeline e2e p50** | **39.24 ms** | **33.62 ms** | **-5.62 ms** |
-| **whole pipeline e2e p95** | **60.45 ms** | **41.71 ms** | **-18.74 ms** |
+| **core pipeline e2e p50** | **39.24 ms** | **33.62 ms** | **-5.62 ms** |
+| **core pipeline e2e p95** | **60.45 ms** | **41.71 ms** | **-18.74 ms** |
 
-Both columns come from the same process (`final-01`), so they are comparable
-with each other; the p95 row in particular reflects one run on a board carrying
-loadavg 1.9, and the **p50 delta of -5.6 ms is the figure to plan with** - a
-quieter session (`cad-core`) put the 512 core pipeline at 32.7 ms p50 / 43.3 ms
-p95, consistent with the p50 but not with an 18.7 ms p95 saving.
+These are the **detector + landmarks core**, one run, on a board at loadavg 1.9. The
+p50 row was the figure this section told the reader to plan with; the p95 row was
+flagged as unreliable. Both judgements were right.
 
-**Recommendation: ship the 512 engine. — DONE, 2026-09-13 afternoon.** All twelve
-profiles now point at `engines/scrfd_500m_512_fp16_gpu.engine`. Two consequences that
-this section's latency-only framing did not anticipate, and that a reader must have:
+### The evening paired A/B (`dms.app`, whole pipeline, six pairs)
 
-* The nine golden replay fixtures were recorded against the **640** detector at
-  10:36-10:40 KST, before the swap. **3 of the 9 are now red** — `day_driver`,
-  `rear_end_accident` and `rear_end_whiplash`, all on `driver_changed` edge counts,
-  because a different detector at a different input size finds different faces and
-  therefore moves track ids. That is the accuracy half of the trade arriving late and
-  through the regression harness rather than through a recall study.
-* The accuracy half still has not been done properly. See the caveat below, which
-  still stands.
+The two single-engine sweeps taken this evening **disagreed about the sign** of the
+difference: the 512 sweep put `default` at a 78.51 ms median and the 640 sweep put it
+at 72.21 ms, while inside that same 640 sweep the 512 profile measured 77.72 ms. On a
+board whose per-profile spread is 7-33 ms, sequential blocks are confounded by
+whatever the neighbours are doing and by thermal drift across a 15-minute sweep. So:
+six A/B pairs, 300 frames each, **alternating which engine ran first**.
 
-Why it was recommended: It costs 5.6 ms of p50 for the whole
-pipeline - far more than the 1.35 ms the
-engine-alone comparison suggests, because the decode also shrinks (8192/2048/512
-anchor rows instead of 12800/3200/800) and the smaller preprocess and smaller
-D2H buffers compound. On a 66 ms budget that is 8.5% of the whole allowance, and
-it is the cheapest item on the ranked list that nobody has to write code for.
+| pair | 640 p95 | 512 p95 | delta | ran first |
+|---:|---:|---:|---:|---|
+| 1 | 99.45 | 82.51 | +16.94 | 640 |
+| 2 | 66.50 | 78.15 | -11.65 | 512 |
+| 3 | 81.30 | 77.15 | +4.15 | 640 |
+| 4 | 77.79 | 67.07 | +10.72 | 512 |
+| 5 | 86.93 | 66.63 | +20.30 | 640 |
+| 6 | 73.22 | 71.63 | +1.59 | 512 |
 
-**The caveat this workstream cannot settle.** 512 vs 640 is an accuracy/latency
-trade and only the latency half has been measured. A driver's face at 720p is
-typically 150-250 px wide, well above SCRFD-500m's smallest reliable scale at
-either input size, so the loss should be small - but "should be" is not a
-measurement. Before the switch is made permanent, someone must run both engines
-over the nine replay clips and compare detection recall and box IoU on the
-driver track. `scripts/bench.py --profiles optimised,optimised512` gives the
-latency half of that comparison; the accuracy half belongs to the perception
-workstream.
+| | SCRFD-640 | SCRFD-512 |
+|---|---:|---:|
+| e2e p95 median | 79.55 ms | 74.39 ms |
+| e2e p95 range | 66.50-99.45 | 66.63-82.51 |
+| e2e p50 median | 52.25 ms | 47.40 ms |
+| **runs inside the 66 ms gate** | **0 of 6** | **0 of 6** |
+
+**Paired delta: +7.44 ms p95 median, +5.40 ms p50 median, 640 slower in 5 of 6
+pairs.** The p50 figure reproduces the morning's -5.62 ms almost exactly, which is a
+good sign for the microbenchmark. It is also **not enough**: the median run must come
+down by ~13 ms to meet the gate, and neither engine passed a single one of the twelve
+runs. The trade was made to buy a pass; there is no pass to buy at this size.
+
+### The accuracy half, which had not been done and now has
+
+Both engines through the shipped `ScrfdDetector` over all nine replay clips - **16,451
+frames**, conf 0.5 - counting frames whose face centre lands inside
+`driver_roi [0, 0, 0.65, 1.0]`:
+
+| clip | frames | 640 | 512 | delta |
+| --- | ---: | ---: | ---: | ---: |
+| `day_driver` | 6218 | 1105 | 930 | **-15.8%** |
+| `rear_end_accident` | 186 | 160 | 153 | -4.4% |
+| `rear_end_whiplash` | 528 | 263 | 257 | -2.3% |
+| `family_vacation_crash` | 1873 | 1609 | 1585 | -1.5% |
+| `minivan` | 1440 | 1431 | 1416 | -1.0% |
+| `red_car_crash` | 2808 | 2767 | 2743 | -0.9% |
+| `bmw_rear_ended` | 398 | 297 | 297 | 0.0% |
+| `guy_rear_ended` | 1830 | 0 | 0 | 0.0% (no face found either way) |
+| `getting_rear_ended` | 1170 | 1091 | 1105 | +1.3% |
+| **total** | **16451** | **8723** | **8486** | **-2.7%** |
+
+98% of the 176 `day_driver` frames the 512 loses are **>= 60 px wide, median 75 px**:
+that is the driver at medium range, not the background faces of a dashcam montage.
+Downstream, over the same 300 frames of `day_driver`, `driver_changed` enter/exit goes
+**2 -> 10** against a golden band of [1, 3] - the identity layer re-acquires the driver
+five times more often. Mitigating measurement: the longest run of consecutive frames
+on which 512 loses the driver is 11 (~0.37 s at 30 fps), short of the 1.0 s
+`face_lost_s` dwell, so it does not raise `FACE_LOST` on its own.
+
+### What the config comment used to claim, and what it actually was
+
+The justification duplicated verbatim into twelve profiles said the corpus was
+"1986 frames" (it is 16,451), the driver-ROI loss "-1.6%" (it is -2.7%), the worst
+clip "day_driver -12/155 (-7.7%)" (it is -175/1105, -15.8%), that "minivan,
+red_car_crash and family_vacation_crash lose nothing" (they lose 15, 24 and 24
+frames), and that "82% of what 512 drops is under 60 px wide ... not the driver" (98%
+of what it drops on `day_driver` is **over** 60 px, squarely inside the 65-146 px band
+the same comment called the driver). None of those five claims survives
+re-measurement. The comment is now short, states only the local facts, and points
+here for the tables - the duplicated version went stale in twelve files at once, which
+is the second-order lesson.
+
+### Where the 512 lives now
+
+`configs/lowlatency.yaml`: identical to `default.yaml` except for
+`models.face.engine` and `capture.letterbox`, with the whole quality table restated in
+its own header, and pinned as the single permitted exception by
+`tests/test_config.py::test_only_the_low_latency_profile_ships_a_different_detector`.
+It is measured in section 1 like everything else, it misses the gate like everything
+else, and no golden is recorded against it.
+
+### What would actually close the 13 ms
+
+Not the detector. Items 1 and 2 of section 9's ranked list - moving the object net off
+the frame thread (-15.4 ms of p95, already measured) and locking the GPU clock (up to
+5.2x on a single engine between 114 and 510 MHz, needs root). Either alone is larger
+than the whole 640 -> 512 difference.
 
 ---
 
@@ -502,8 +605,8 @@ p95 on its own.
 and these cadences, the pipeline passed the 66 ms p95 gate with **3.8 ms of margin**.
 That conclusion was correct about the harness and wrong as a prediction about the
 product. The cadences and the CPU fixes are now shipped, and the **application**
-measures 3 PASS / 8 FAIL across the eleven runnable profiles (section 1), with the one
-profile measured three times spanning 65.3 to 79.96 ms p95.
+measures 2 PASS / 10 FAIL across the twelve runnable profiles (section 1), with the
+profile measured nine times spanning 66.50 to 99.45 ms p95 and passing none of them.
 
 The margin was the problem, exactly as this paragraph warned: four milliseconds is not
 a comfortable latency margin on a board whose GPU clock has been observed to move an
@@ -538,7 +641,7 @@ owns the file - none of the top four are in `dms/perf`, `dms/viz` or `scripts/`.
 | 2 | Fix `if want_overlay or not health.degraded:` to `and`, and take the overlay through `OverlayRenderer` | **-30.3 ms** | S | **DONE** — `dms/app.py` rewritten; `want_overlay` no longer exists |
 | 3 | Replace `ScrfdDetector.preprocess` with `dms.runtime.preprocess.Letterbox` | -35 ms standalone, **-16.7 ms in-pipeline** (with #4) | M | **DONE, differently than proposed** — `DmsApp._setup_perception` builds `Letterbox.for_scrfd` from the engine's own input shape and `_perceive` calls it; `dms/infer/scrfd.py` was not touched and its allocating `preprocess` survives as the fallback for external callers |
 | 4 | Convert BGRA->BGR once per frame with `cvtColor` into a reused buffer; never pass the stride-4 view downstream | **-9.6 ms** on landmarks, and it is what makes #3 achievable | M | **DONE** — the app holds a contiguous BGR frame |
-| 5 | Ship the 512 detector engine instead of the 640 | **-5.6 ms p50** (p95 saving seen once at -18.7 ms; do not plan on it) | S | **DONE** in all 12 profiles — and it put 3 golden fixtures into regression; see section 7 |
+| 5 | Ship the 512 detector engine instead of the 640 | **-5.4 ms p50 / -7.4 ms p95**, paired A/B n=6, which reproduces the -5.6 ms predicted here | S | **TRIED AND REVERTED**. It is a real saving and it is not the ~13 ms the gate needs — 0 of 6 runs passed on either engine — and it cost 15.8% of the driver-ROI face hits on `day_driver` and put 3 goldens into regression. Section 7. The 512 point survives as `configs/lowlatency.yaml` |
 | 6 | Run the object net every 20th frame with a staggered phase (or move it to a second thread) | **-15.4 ms p95**, measured back to back | S | **DONE** — `objects.every_n: 20`, `occlusion.every_n: 15` in every profile |
 | 7 | Lock the GPU clock for timing runs and report the gate at both clocks | up to 5.2x on one engine between 114 and 510 MHz; est. 5-8 ms/frame, not directly measurable without root | S | operator/systemd, not the app |
 | 8 | Create each engine's completion event once with `cudaEventDisableTiming` instead of create+destroy per inference | not isolated; the total host-over-GPU overhead it sits inside is 0.27-3.02 ms per engine, ~6 ms/frame across six small heads | S | **STILL OPEN** — `dms/runtime/trt_engine.py`; `grep -c 'cudaEventCreate\|_event_pool\|_events'` returns 0 as of 2026-09-13 17:00 |
@@ -666,11 +769,16 @@ What is left, in the same spirit:
    9, ~6 ms/frame). Not applied; `grep -c 'cudaEventCreate\|_event_pool\|_events'`
    returns 0.
 2. **`/healthz` has no first-class `perf_gate` object.** The verdict reaches it as an
-   operator note plus the `degraded` flag, and `/metrics` as the five gauges.
-   `HealthState.as_dict` in `dms/io/health.py` is a fixed key set; a structured field
-   is a one-line addition there.
+   operator note (which now names the half that missed and the signed margin), the
+   `degraded` flag after a 10 s dwell, `latency_ms.gate_limit_p95` next to
+   `latency_ms.e2e_p95` from the first refresh, and `/metrics` as the five gauges.
+   A structured field is still a one-line addition to `HealthState.as_dict` in
+   `dms/io/health.py`, which this workstream does not own.
 3. **`scripts/run_all_replay.py`'s `RE_WARN` does not match the new `PERF_GATE FAIL`
-   line**, so a batch replay will not flag a gate miss.
+   line**, so a batch replay will not flag a gate miss. The golden harness
+   (`tests/replay/golden/run_golden.py`) does now parse it and prints `gate=PASS|FAIL|
+   UNDECIDED` per clip, and records it in the fixture; `run_all_replay.py` is not this
+   workstream's file.
 4. **`dms/infer/objects.py:letterbox_topleft` is a third independent letterbox
    implementation.** `Letterbox.for_yolox` exists and is ready; collapsing them needs
    an edit to that file.
@@ -686,22 +794,27 @@ Stated so nobody mistakes silence for a result.
   tested as such, but **no long-run RSS curve exists, and none has ever been
   attempted**. Peak RSS at 300 frames is 1.32-1.39 GiB against a 5.0 GB limit. Nothing
   here says anything about hour two.
-* **Any accuracy consequence of the SCRFD 640 -> 512 swap**, other than the three
-  golden fixtures it turned red. The recall study section 7 asks for still has not
-  been run.
-* **Repeatability.** The closest thing to a repeatability measurement in this document
-  is the three-run `default.yaml` sequence in section 1, and it spans 65.3 to 79.96 ms
-  p95. Nobody has run a profile ten times and reported a distribution. Every "measured"
-  number here is n=1.
+* ~~**Any accuracy consequence of the SCRFD 640 -> 512 swap.**~~ **Done** - the recall
+  study this section used to ask for is section 7: both engines over all nine clips,
+  16,451 frames, per-clip driver-ROI counts, plus the identity-layer consequence. The
+  answer was -2.7% overall and -15.8% on the flagship clip, and the swap was reverted.
+  What is still not measured is the accuracy of either detector against **ground
+  truth** - there is none in this repository (see `tests/replay/CLIPS.md`), so this is
+  a 640-versus-512 comparison, not a recall figure.
+* **Repeatability, partly.** Sections 1 and 7 are now n >= 3 per profile, n = 9 on
+  `default` and `lowlatency`, with a paired A/B for the detector. Every latency figure
+  in **sections 2 to 6 and 8** is still n=1 and should be read as one sample from a
+  distribution whose width is 7-33 ms.
 * **The clocks-locked gate.** Needs root. See section 3.
 * **`cv2.setNumThreads`.** OpenCV runs 6 TBB threads by default and the capture
   thread, the TensorRT host code and the letterbox all compete for the same six
   cores inside a 20 W envelope. Nothing in `dms/` pins the count and the cost of
   the contention has not been measured. It is item 9 on the ranked list rather
   than higher because it is a guess until someone sweeps it.
-* **Accuracy of anything.** This is a latency and memory document. The 512 vs
-  640 recommendation, the head-pose-versus-geometry fallback and every cadence
-  in section 8 all have an accuracy dimension that belongs to the perception
+* **Accuracy of most things.** This is a latency and memory document. The 512-vs-640
+  comparison in section 7 is the one exception and it is a comparison, not a recall
+  measurement. The head-pose-versus-geometry fallback and every cadence in section 8
+  still have an unmeasured accuracy dimension that belongs to the perception
   workstream.
 * **A live camera.** There is no `/dev/video*` on this board. The 6.6 ms capture
   figure is GStreamer mp4 decode, which a CSI sensor path will not resemble.

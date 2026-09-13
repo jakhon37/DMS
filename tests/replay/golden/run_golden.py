@@ -16,6 +16,16 @@ Per clip, from a fixed number of frames of a fixed profile:
 ``face_hits``        total detections summed over the run (a band)
 ``alerts``           per ``AlertType``, the number of ``enter`` / ``escalate`` /
                      ``exit`` edges in ``events.jsonl`` (a band each)
+``detector_engine``  (schema 3) the face engine the profile selected when the
+                     golden was recorded.  A golden is only a baseline for the
+                     detector it was taken with, and swapping the detector under
+                     a recorded golden is exactly how a 15.8% recall regression
+                     shipped: ``tests/test_app_integration.py`` compares this
+                     field against what the profile selects TODAY, with no GPU
+                     and no clip, so that swap now fails the ordinary pytest run.
+``gate``             (reference only) the ``PERF_GATE`` verdict of the run, so a
+                     batch replay shows whether each clip met its own latency
+                     gate.  Never asserted - see the latency note below.
 
 Every count is a BAND, ``[min, max]``, not a number.  The pipeline is
 deterministic in its arithmetic - the state machine runs on media time taken
@@ -37,10 +47,19 @@ moved, come and look", never as "the system got less accurate".
 
 Latency is recorded for reference and never asserted: this board's GPU governor
 has been observed to move an identical inference by 5x, so a latency assertion
-would fail on a busy board and pass on an idle one.
+would fail on a busy board and pass on an idle one.  Measured 2026-09-13, n=3
+per profile: the run-to-run e2e p95 spread is 7-16 ms on the nine clips, against
+a 66 ms gate - so the recorded ``gate`` verdict is one observation, not a
+property.  Read it, do not gate on it.
 
 Usage
 -----
+    # normally you do not run this by hand: pytest runs it, one test per clip,
+    # behind DMS_REPLAY_TESTS=1 (see tests/test_app_integration.py).  It is
+    # gated because it needs the GPU and the whole GPU is shared:
+    flock /tmp/jetson-gpu.lock -c "DMS_REPLAY_TESTS=1 PYTHONPATH=. \\
+        ./.venv/bin/python -m pytest -q tests/test_app_integration.py"
+
     # check every clip that has a golden (this is the regression gate)
     flock /tmp/jetson-gpu.lock -c "PYTHONPATH=. ./.venv/bin/python \\
         tests/replay/golden/run_golden.py"
@@ -66,7 +85,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 REPLAY = os.path.join(ROOT, "tests", "replay")
 
-SCHEMA = "dms.replay_golden/2"
+SCHEMA = "dms.replay_golden/3"
 
 #: Fractional half-width of a recorded band.
 TOLERANCE = 0.25
@@ -90,6 +109,11 @@ CLIPS = [
     ("rear_end_whiplash", "configs/rear_end_whiplash.yaml", 300),
 ]
 
+RE_GATE = re.compile(
+    r"PERF_GATE (?P<verdict>PASS|FAIL|UNDECIDED) e2e_p95=(?P<p95>[0-9.]+) ms "
+    r"limit=(?P<limit>[0-9.]+) ms"
+)
+
 RE_FINAL = re.compile(
     r"stopped frames=(?P<frames>\d+) last_id=(?P<last_id>\d+) "
     r"mean_infer_ms=(?P<mean>[0-9.]+) total_face_hits=(?P<hits>\d+) "
@@ -99,6 +123,23 @@ RE_FINAL = re.compile(
 
 def golden_path(stem):
     return os.path.join(HERE, "%s.json" % stem)
+
+
+def profile_detector_engine(config):
+    """The face engine ``config`` selects right now, or ``None`` if unreadable.
+
+    Kept tolerant on purpose: this module is imported by pytest off-board, where
+    ``dms.config`` and its dependencies may not be importable.  ``None`` means
+    "could not tell", and every caller treats that as "do not judge".
+    """
+    try:
+        from dms.config.schema import load_config
+    except Exception:  # pragma: no cover - depends on the environment
+        return None
+    try:
+        return load_config(os.path.join(ROOT, config)).models.face.engine
+    except Exception:  # pragma: no cover - a broken profile fails elsewhere
+        return None
 
 
 def band(value):
@@ -175,10 +216,17 @@ def run_clip(stem, config, frames, python, timeout_s):
             alerts[key][edge] += 1
         os.unlink(events)
 
+    g = RE_GATE.search(out)
     obs = {
         "frames": int(m.group("frames")),
         "face_hits": int(m.group("hits")),
         "alerts": alerts,
+        "detector_engine": profile_detector_engine(config),
+        "gate": None if g is None else {
+            "verdict": g.group("verdict"),
+            "e2e_p95_ms": float(g.group("p95")),
+            "limit_ms": float(g.group("limit")),
+        },
         "latency_ms": {
             "mean_infer": float(m.group("mean")),
             "e2e_p50": float(m.group("p50")),
@@ -204,6 +252,9 @@ def to_golden(stem, config, frames, obs):
         "frames": int(obs["frames"]),
         "face_hits": band(obs["face_hits"]),
         "alerts": alerts,
+        # Schema 3.  A golden is a baseline for ONE detector; see the header.
+        "detector_engine": obs.get("detector_engine"),
+        "gate": obs.get("gate"),
         "reference_latency_ms": obs["latency_ms"],
         "note": (
             "Bands pin software behaviour, not ground truth: these clips are dashcam "
@@ -216,6 +267,14 @@ def to_golden(stem, config, frames, obs):
 def compare(stem, golden, obs):
     """Return a list of human-readable regression strings (empty = pass)."""
     bad = []
+    want_engine = golden.get("detector_engine")
+    got_engine = obs.get("detector_engine")
+    if want_engine and got_engine and want_engine != got_engine:
+        bad.append(
+            "%s: golden was recorded against %s, the profile now selects %s - "
+            "re-record deliberately or put the detector back"
+            % (stem, os.path.basename(want_engine), os.path.basename(got_engine))
+        )
     if obs["frames"] != golden["frames"]:
         bad.append(
             "%s: processed %d frames, golden says %d"
@@ -282,14 +341,16 @@ def main(argv=None):
         alert_summary = ",".join(
             "%s:%s" % (a, sum(e.values())) for a, e in sorted(obs["alerts"].items())
         )
+        gate = obs.get("gate") or {}
         rows.append(
-            "%-24s frames=%-4d faces=%-5d p50=%-6.1f p95=%-6.1f %s"
+            "%-24s frames=%-4d faces=%-5d p50=%-6.1f p95=%-6.1f gate=%-9s %s"
             % (
                 stem,
                 obs["frames"],
                 obs["face_hits"],
                 obs["latency_ms"]["e2e_p50"],
                 obs["latency_ms"]["e2e_p95"],
+                gate.get("verdict", "?"),
                 alert_summary or "-",
             )
         )

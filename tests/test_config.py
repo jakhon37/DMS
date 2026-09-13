@@ -159,6 +159,58 @@ def test_production_yaml_is_a_real_vehicle_config():
     )
 
 
+#: The detector every shipped profile must select.  Pinned, not inferred: on
+#: 2026-09-13 all twelve profiles were repointed at the 512 engine to buy
+#: latency, it did not reliably buy the pass, and it cost 15.8% of the
+#: driver-ROI face hits on the flagship clip.  See docs/performance.md s.7.
+SHIPPED_FACE_ENGINE = "engines/scrfd_500m_640_fp16_gpu.engine"
+
+#: The one profile that is allowed to differ, and what it is allowed to be.
+LOW_LATENCY_PROFILE = "lowlatency.yaml"
+LOW_LATENCY_FACE_ENGINE = "engines/scrfd_500m_512_fp16_gpu.engine"
+
+
+@pytest.mark.parametrize("path", PROFILES, ids=[os.path.basename(p) for p in PROFILES])
+def test_only_the_low_latency_profile_ships_a_different_detector(path):
+    """One documented exception, and it must be the documented one.
+
+    Without this, "make the gate pass" is one line of YAML in twelve files away
+    at any time, and the golden bands - which are recorded per detector - stop
+    meaning anything.  If a new detector is genuinely wanted, change this
+    constant deliberately and re-record the goldens in the same change.
+    """
+    cfg = load_config(path)
+    name = os.path.basename(path)
+    if name == LOW_LATENCY_PROFILE:
+        assert cfg.models.face.engine == LOW_LATENCY_FACE_ENGINE, name
+    else:
+        assert cfg.models.face.engine == SHIPPED_FACE_ENGINE, (
+            "%s selects %s; only %s may differ from %s"
+            % (name, cfg.models.face.engine, LOW_LATENCY_PROFILE, SHIPPED_FACE_ENGINE)
+        )
+
+
+def test_the_low_latency_profile_exists_and_is_only_a_detector_swap():
+    """``lowlatency.yaml`` must stay a one-knob variant of ``default.yaml``.
+
+    It is kept so the 512 operating point remains available and measurable
+    after the revert.  If it drifts into a second set of thresholds, comparing
+    the two stops measuring the detector and starts measuring the drift.
+    """
+    lo = os.path.join(CONFIG_DIR, LOW_LATENCY_PROFILE)
+    assert os.path.isfile(lo), "the documented low-latency profile is missing"
+    a = load_config(os.path.join(CONFIG_DIR, "default.yaml")).dict()
+    b = load_config(lo).dict()
+    differing = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+    assert differing == ["capture", "models"], differing
+    assert a["capture"]["letterbox"] == (640, 640)
+    assert b["capture"]["letterbox"] == (512, 512)
+    a["capture"]["letterbox"] = b["capture"]["letterbox"] = None
+    a["models"]["face"]["engine"] = b["models"]["face"]["engine"] = None
+    assert a["capture"] == b["capture"]
+    assert a["models"] == b["models"]
+
+
 def test_lab_profiles_use_a_synthetic_source():
     for name in ("testsrc.yaml", "systemd-lab.yaml"):
         cfg = load_config(os.path.join(CONFIG_DIR, name))
@@ -418,56 +470,176 @@ def test_replay_batch_config_for_clip():
 
 # --------------------------------------------------- the gate a profile ships
 
-#: End-to-end p95 each detector build MEASURED on this Xavier NX (nvpmodel 8,
-#: 1280x720, 400 replay frames, 2026-09-13), one DMS process alone on an
-#: otherwise idle board, with the whole nine-engine pipeline running:
+#: The product latency gate, from docs/production-dms-design.md: 1280x720 end to
+#: end, p95 <= 66 ms, peak RSS < 5.0 GB.  PINNED here so that "make the gate
+#: pass" cannot be spelled "raise the gate".  Changing these two numbers is a
+#: product decision and has to be made in this file, deliberately, with the
+#: design document updated in the same change.
+PRODUCT_GATE_E2E_P95_MS = 66.0
+PRODUCT_GATE_PEAK_RSS_MB = 5000.0
+
+#: End-to-end p95 MEASURED per profile on this Xavier NX (nvpmodel 8
+#: MODE_20W_6CORE, 1280x720, 300 frames per run - 186 for rear_end_accident,
+#: which is shorter - one dms.app process at a time under flock
+#: /tmp/jetson-gpu.lock, 2026-09-13 evening KST), as
+#: ``(runs, median_ms, min_ms, max_ms)``.
 #:
-#:   scrfd_500m_640: default.yaml 71.63 ms @ 18.2 FPS, minivan.yaml 73.56 ms
-#:   scrfd_500m_512: default.yaml 63.08 ms @ 19.4 FPS, minivan.yaml 61.90 ms
-#:
-#: "Alone on the board" is the reference condition, and it has to be stated: the
-#: same 512 profiles measured 65-72 ms while another tenant held a CPU core, so
-#: these numbers are a floor for a shipped gate, not a promise about a loaded
-#: board.  Every profile used to ship the 640 engine under a 66.0 ms gate - a
-#: configuration that could not meet its own gate under any condition.
+#: REPEATED, not spot-checked, because the run-to-run spread on this board is
+#: 6.5-33 ms and is therefore several times the margin the gate is judged by.  A
+#: single observation of this pipeline is a sample from that distribution and
+#: means almost nothing; the median of several is the number to reason with, and
+#: the min/max are quoted so nobody mistakes the median for a guarantee.
+#: ``default`` and ``lowlatency`` carry n=9 because they are the pair the
+#: detector decision turns on (3 sweep runs each plus 6 paired A/B runs).
 MEASURED_E2E_P95_MS = {
-    "scrfd_500m_640_fp16_gpu.engine": 73.6,
-    "scrfd_500m_512_fp16_gpu.engine": 63.1,
+    "default.yaml": (9, 77.79, 66.50, 99.45),
+    "lowlatency.yaml": (9, 77.15, 65.26, 82.51),
+    "minivan.yaml": (3, 80.38, 65.70, 98.32),
+    "red_car_crash.yaml": (3, 84.21, 78.79, 91.23),
+    "family_vacation_crash.yaml": (3, 82.57, 75.92, 89.82),
+    "rear_end_accident.yaml": (3, 85.79, 75.06, 87.38),
+    "guy_rear_ended.yaml": (3, 85.75, 75.99, 93.71),
+    "bmw_rear_ended.yaml": (3, 77.12, 66.17, 79.03),
+    "getting_rear_ended.yaml": (3, 82.16, 76.36, 82.87),
+    "rear_end_whiplash.yaml": (3, 69.60, 69.36, 77.05),
+    "testsrc.yaml": (3, 35.12, 34.78, 35.75),
+    "systemd-lab.yaml": (3, 36.50, 35.42, 39.83),
+}
+
+#: Profiles that cannot be executed on this board at all, and why.  An entry
+#: here is a promise that the profile is unmeasurable, not that it is fast.
+UNRUNNABLE_PROFILES = {
+    "production.yaml": (
+        "source type csi and there is no camera on this board; it also writes "
+        "to /var/lib/dms, which is not writable without root, so it exits on "
+        "the event log before it reaches the camera"
+    ),
+}
+
+#: Profiles MEASURED to miss the product latency gate, with the median that
+#: missed it.  This list is the honest record of a known degrade: the shipped
+#: build does not meet its latency gate on real footage, on either detector, and
+#: says so in the PERF_GATE line, in the /healthz note and here.  Ten of the thirteen
+#: shipped profiles are on it - ten of the twelve that run on this board, the other
+#: two being the synthetic sources that find no faces.  Shortening this list requires
+#: a measurement, not an edit.
+KNOWN_GATE_MISSES = {
+    "default.yaml",
+    "lowlatency.yaml",
+    "minivan.yaml",
+    "red_car_crash.yaml",
+    "family_vacation_crash.yaml",
+    "rear_end_accident.yaml",
+    "guy_rear_ended.yaml",
+    "bmw_rear_ended.yaml",
+    "getting_rear_ended.yaml",
+    "rear_end_whiplash.yaml",
 }
 
 
 @pytest.mark.parametrize("path", PROFILES, ids=[os.path.basename(p) for p in PROFILES])
-def test_shipped_profile_can_meet_its_own_latency_gate(path):
-    """A profile may not declare a gate its own detector has been measured to miss.
+def test_every_profile_declares_the_product_latency_gate(path):
+    """No profile may quietly relax the gate it is judged by.
 
-    This is the regression guard for the blocker: every shipped profile paired
-    ``perf.gate_e2e_p95_ms: 66.0`` with the 640 detector, which measures 71.6-73.6
-    ms end to end on this board.
+    The predecessor of this test asserted the opposite direction - that the
+    declared gate was at least as large as the detector's measured latency -
+    which a profile could satisfy by declaring a bigger gate.  A gate a profile
+    chooses for itself is not a gate.
     """
     cfg = load_config(path)
-    engine = os.path.basename(cfg.models.face.engine)
-    measured = MEASURED_E2E_P95_MS.get(engine)
-    assert measured is not None, (
-        "%s ships face detector %s, which has no measured e2e p95 in "
-        "MEASURED_E2E_P95_MS. Measure it on the board (DMS_LATENCY_BUDGET_OUT=... "
-        "--max-frames 400) and record the number here before shipping it."
-        % (os.path.basename(path), engine)
+    assert cfg.perf.gate_e2e_p95_ms == pytest.approx(PRODUCT_GATE_E2E_P95_MS), (
+        "%s declares gate_e2e_p95_ms=%.1f; the product gate is %.1f ms and "
+        "moving it is a design decision, not a profile tweak."
+        % (os.path.basename(path), cfg.perf.gate_e2e_p95_ms, PRODUCT_GATE_E2E_P95_MS)
     )
-    assert cfg.perf.gate_e2e_p95_ms >= measured, (
-        "%s declares gate_e2e_p95_ms=%.1f but %s measures %.1f ms end to end: "
-        "the profile cannot pass its own gate."
-        % (os.path.basename(path), cfg.perf.gate_e2e_p95_ms, engine, measured)
+    assert cfg.perf.gate_peak_rss_mb == pytest.approx(PRODUCT_GATE_PEAK_RSS_MB), (
+        os.path.basename(path),
+        cfg.perf.gate_peak_rss_mb,
     )
 
 
-def test_every_profile_ships_the_same_detector_build():
-    """The profiles are generated together; a stray 640 would fail the gate alone."""
-    engines = {}
-    for path in PROFILES:
-        engines.setdefault(
-            os.path.basename(load_config(path).models.face.engine), []
-        ).append(os.path.basename(path))
-    assert len(engines) == 1, "profiles disagree on the face detector: %s" % engines
+@pytest.mark.parametrize("path", PROFILES, ids=[os.path.basename(p) for p in PROFILES])
+def test_every_profile_has_a_repeated_latency_measurement_on_record(path):
+    """A shipped profile must have been measured, more than once, recently.
+
+    "Measured" used to mean one number per DETECTOR, which is how a profile
+    could inherit a 63.1 ms figure taken on a different clip in a different
+    board condition and be considered characterised.  Per profile, n >= 3.
+    """
+    name = os.path.basename(path)
+    if name in UNRUNNABLE_PROFILES:
+        assert name not in MEASURED_E2E_P95_MS, (
+            "%s is listed as unrunnable but also carries a measurement" % name
+        )
+        return
+    row = MEASURED_E2E_P95_MS.get(name)
+    assert row is not None, (
+        "%s has no entry in MEASURED_E2E_P95_MS. Measure it on the board "
+        "(at least three runs of 300 frames under flock /tmp/jetson-gpu.lock) "
+        "and record (runs, median, min, max) before shipping it." % name
+    )
+    runs, med, lo, hi = row
+    assert runs >= 3, "%s: %d run(s) is a spot check, not a measurement" % (name, runs)
+    assert lo <= med <= hi, (name, row)
+
+
+@pytest.mark.parametrize("path", PROFILES, ids=[os.path.basename(p) for p in PROFILES])
+def test_a_profile_that_misses_the_gate_is_declared_as_a_miss(path):
+    """The honesty test. Measured reality and declared reality must agree.
+
+    Both directions are failures:
+
+    * a profile whose measured median exceeds the gate and is NOT in
+      ``KNOWN_GATE_MISSES`` is an undeclared degrade - which is what the repo
+      shipped before the SCRFD-512 swap, and what the swap was made to hide;
+    * a profile in ``KNOWN_GATE_MISSES`` whose measured median is now inside the
+      gate is stale pessimism, and stale honesty rots into noise that readers
+      learn to skip.
+
+    Note what this test does NOT do: it does not fail a profile for missing the
+    gate.  The build misses the gate on nine of twelve profiles and that is the
+    recorded, accepted state - see docs/performance.md section 1. It fails a
+    profile for missing the gate SILENTLY.
+    """
+    name = os.path.basename(path)
+    if name in UNRUNNABLE_PROFILES:
+        assert name not in KNOWN_GATE_MISSES, name
+        return
+    runs, med, lo, hi = MEASURED_E2E_P95_MS[name]
+    cfg = load_config(path)
+    misses = med > cfg.perf.gate_e2e_p95_ms
+    if misses:
+        assert name in KNOWN_GATE_MISSES, (
+            "%s measures a median e2e p95 of %.2f ms against its own %.1f ms "
+            "gate and is not declared in KNOWN_GATE_MISSES. Declare it, and say "
+            "so in docs/performance.md - do not swap a model to make the number "
+            "look better." % (name, med, cfg.perf.gate_e2e_p95_ms)
+        )
+    else:
+        assert name not in KNOWN_GATE_MISSES, (
+            "%s is declared a gate miss but measures a median of %.2f ms "
+            "against a %.1f ms gate. Re-measure and update both."
+            % (name, med, cfg.perf.gate_e2e_p95_ms)
+        )
+
+
+def test_the_recorded_spread_is_wider_than_the_gate_margin():
+    """Guards the reason every other number in this section is a median.
+
+    If this ever stops being true the board has changed and the whole
+    measurement protocol (n >= 3, medians, min/max) can be simplified. Until
+    then, a single PASS is not evidence of a pass, and no document in this repo
+    may quote one as if it were.
+    """
+    worst = 0.0
+    for name, (runs, med, lo, hi) in MEASURED_E2E_P95_MS.items():
+        if name in ("testsrc.yaml", "systemd-lab.yaml"):
+            continue  # synthetic source, no faces: not the working pipeline
+        worst = max(worst, hi - lo)
+    assert worst > 10.0, (
+        "recorded run-to-run spread has collapsed to %.1f ms; re-check whether "
+        "the median-of-n protocol is still needed" % worst
+    )
 
 
 @pytest.mark.parametrize("path", PROFILES, ids=[os.path.basename(p) for p in PROFILES])

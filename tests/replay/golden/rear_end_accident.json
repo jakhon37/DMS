@@ -33,18 +33,20 @@
   },
   "clip": "tests/replay/rear_end_accident.mp4",
   "config": "configs/rear_end_accident.yaml",
+  "detector_engine": "engines/scrfd_500m_640_fp16_gpu.engine",
   "face_hits": [
     229,
     381
   ],
   "frames": 186,
+  "gate": null,
   "max_frames": 300,
-  "note": "Bands pin software behaviour, not ground truth: these clips are dashcam montages with no labelled drowsiness events. Latency is reference only - this board's GPU governor moves an identical inference by up to 5x.",
+  "note": "Bands pin software behaviour, not ground truth: these clips are dashcam montages with no labelled drowsiness events. Latency is reference only - this board's GPU governor moves an identical inference by up to 5x. Schema 3 field detector_engine added 2026-09-13 without re-recording: the recorded face_hits midpoint reproduces exactly on scrfd_500m_640 for all nine clips and differs on five under scrfd_500m_512, so these bands are a 640 baseline.",
   "recorded_utc": "2026-09-13T01:38:22Z",
   "reference_latency_ms": {
     "e2e_p50": 57.4,
     "e2e_p95": 87.3,
     "mean_infer": 56.1
   },
-  "schema": "dms.replay_golden/2"
+  "schema": "dms.replay_golden/3"
 }
