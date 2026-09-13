@@ -4,12 +4,12 @@
 | --- | --- |
 | **Title** | Xavier NX In-Cabin Driver Monitoring System — Production Architecture |
 | **Author** | TBD |
-| **Date** | 2026-09-01 (rev 5) |
-| **Status** | Draft |
+| **Date** | 2026-09-01 (rev 5). **As-built deviations appended 2026-09-13.** |
+| **Status** | Draft as a design; **partly superseded as a description**. This document is still the v1 *contract* and K1-K17 are still binding. It is no longer an accurate description of the shipped tree — read [As-built deviations](#as-built-deviations-from-this-contract-2026-09-13) before using any table here as a statement of fact. |
 | **Target hardware** | NVIDIA Jetson Xavier NX Developer Kit (`nvidia,p3449-0000+p3668-0001` / `tegra194`) |
 | **Software baseline** | L4T R35.6.5 / JetPack 5.1.6-b5 / TensorRT 8.5.2.2 / CUDA 11.4.19 / Python 3.8.10 |
 | **Repo** | `/home/nvidia/myspace/DMS` (remote: https://github.com/jakhon37/DMS.git) |
-| **Scope of this document** | Design only. No implementation. |
+| **Scope of this document** | Design only. No implementation. The as-built section is the one exception and is clearly marked. |
 
 ---
 
@@ -138,6 +138,100 @@ There is no tracker, no temporal fusion, no config schema, no tests, no logging,
 | K15 | **Headless default**; optional debug overlay behind `dms.display.enabled` | Production image should not require a desktop. Idle RAM is already 2.6 GB with GUI. |
 | K16 | **Local-only privacy**: no race/emotion, no embeddings uploaded, clips off by default, 2 GB / 24 h quota when enabled | In-cabin video is biometric-adjacent. UniFace attribute/recognition heads stay unused. |
 | K17 | **UniFace is a cookbook, never a runtime.** Pin its ONNX URLs/SHA256 in PR-00. Copy crop + 106 indices + PnP point ids. Do not import `uniface`, FairFace, ArcFace, or FaceAnalyzer on the NX | Python ≥3.10, ORT, pip OpenCV, embeddings-by-default — all violate K2/K14/K16. |
+
+---
+
+## As-built deviations from this contract (2026-09-13)
+
+**This section is a description, not a design.** It was appended after the system was
+built and measured, so that a reader who takes a number or a decision out of the
+design tables above can see immediately where the shipped tree differs. Everything in
+it was verified on this board on 2026-09-13 between 16:45 and 17:10 KST.
+
+**K1-K17 above are unchanged and still binding.** Nothing here relaxes them; four of
+them were implemented differently and are recorded as such.
+
+### Where the implementation departs from a Key Decision
+
+| K | What the contract says | What shipped | Verdict |
+| --- | --- | --- | --- |
+| **K5** | Face is **SCRFD-500m-kps 640x640** FP16 on GPU | SCRFD-500m-kps at **512x512** in all twelve profiles; the 640 engine is built and is now the unused alternate | **Deviation, and the accuracy half of the trade was never done.** The swap was made on latency evidence alone (≈5.6 ms of whole-pipeline p50) and shipped on 2026-09-13 at 14:32. Three of the nine golden replay fixtures went red as a result, on `driver_changed` edge counts, because a different detector at a different input size finds different faces. The recall study `docs/performance.md` §7 asks for has still not been run. |
+| **K7** | v1 head pose is **PnP from 106 landmarks**. Do not ship a pose network; 6DRepNet-A0 is v1.1 only, with a named, hashed, licensed checkpoint | A real pose network **is** the primary path: `hpe_mobilenetv2_224_fp16_gpu`, a 6DRepNet-style MobileNetV2 under MIT, hashed in `engines/MANIFEST.json`. `solve_head_pose` is the fallback and is gated on a reprojection residual and a keypoint cross-check, returning confidence 0 rather than a confident wrong angle | **Deviation that satisfies the spirit of K7.** The clause K7 actually protected against — "renaming `backbone_name` does not yield a trained A0" — is respected: this is a named, hashed, MIT-licensed checkpoint, not a relabelled B1g2. It is a v1.1 decision taken in v1. **No pose accuracy has ever been validated against ground truth,** and with no `forward_zero` every absolute angle is a relative signal. |
+| **K9** | Objects: **YOLOv8n 320x320** FP16, every Nth frame, lap/cabin ROI. Drop Cap | **YOLOX-Nano 416x416**, Apache-2.0, every 20th frame, on a configured cabin ROI, `classes: [cell phone]`. Cap dropped as specified | **Deviation, and it resolves Open Question 10 and R17.** YOLOv8n is Ultralytics AGPL-3.0; YOLOX-Nano is Apache-2.0, so the AGPL blocker on the object net is gone and the capability is on by default. Note the input is 416, not the budgeted 320. **The path has never fired on real footage** — no clip in `tests/replay` contains a phone. |
+| **K10** | Single process, **4 threads**, bounded queues with drop-oldest | Single process, **3 threads**: the main inference loop, one GStreamer capture thread (`gst-capture`), one daemon health thread. One `Queue(depth=1)` between capture and the loop | **Deviation, in the conservative direction.** Fewer moving parts than designed. The K10 rationale (no cross-process CUDA context sharing, never block capture) is satisfied. |
+| **K13** | FP16 v1, **static shapes, batch=1** | FP16, static, batch 1 everywhere **except** the eye classifier, which ships as `ocec_s_24x40_b2` — a batch-**2** engine so both eyes go in one submit | **Deliberate minor deviation.** Measured host round trip 0.92 ms for the pair versus 0.86 ms for a single eye, i.e. it halves the number of submits for 0.06 ms. The batch-1 engine is still built and is the unused alternate. |
+| K3 | Prefer `cuda-python`, ctypes `libcudart.so` fallback | The **ctypes path** shipped: `dms/runtime/cudart.py` | Contract honoured — K3 named this as the fallback and it is the one that worked. |
+| K8 | Gaze v1 = PnP/head pose + eyelid-centre; dedicated gaze net is v1.5+ | A dedicated gaze engine (`mobilenetv2_gaze_448`) was **built** but is licence-gated off in code and is never deserialised | Contract honoured. Gaze360 weights are research/non-commercial, so K16 applies; the engine exists only because the build pipeline is manifest-driven. |
+
+### Where the budgets were wrong
+
+**Latency.** The budget table above predicts e2e p95 **~46 ms with the object net**
+against the 66.7 ms gate, and it labels itself "engineering budgets, not
+measurements", which was the right caveat. Measured, with all nine engines and the
+shipped cadences: **65.2-79.7 ms p95 across the eleven runnable profiles, 3 PASS and
+8 FAIL.** The budget was optimistic by roughly 1.5x, and it was optimistic in the
+place it warned about — not in GPU compute (the whole model zoo is under 25 ms) but in
+CPU data path and TensorRT host round-trip overhead, which the table prices at
+1.0-1.5 ms per stage and which in practice dominates.
+
+There is a second problem the budget could not have anticipated: **the measurement is
+not repeatable to within the gate's margin.** `configs/default.yaml` measured 65.3 ms
+p95 (PASS) and 72.7 ms p95 (FAIL) on two consecutive runs in the same session, and
+79.96 ms in a third. `CLOCKS_LOW` fired at a peak GPU clock of **204 MHz** against the
+1109 MHz ceiling. The design's own note — "clocks not locked" — turns out to be the
+dominant term.
+
+**Memory.** The budget predicts a v1 peak of **~2100-3300 MB**. Measured peak RSS
+across every profile: **1324-1387 MiB**, i.e. below the low end of the budget and 27%
+of the 5000 MB cap. The memory half of the freeze gate is not close to being a
+constraint, and it never was. Note this is with no camera: `nvargus-daemon` and the
+ISP carveout, budgeted at 200-400 MB, are genuinely zero here and must be added back
+before a CSI unit is sized.
+
+### Which risks in the Risk Register actually materialised
+
+| R | Outcome |
+| --- | --- |
+| **R1** No camera attached | **Materialised in full.** Nothing has ever come from a camera. Replay-first was the right call and it is also the reason nothing about NIR, exposure or real capture latency is known. |
+| **R3** Detector p95 over budget at 20 W | **Materialised**, though via the whole pipeline rather than the detector alone. The mitigation actually taken was the input-size drop (K5 deviation), not skipping the object net. |
+| **R5** Thermal | Not observed — but no run has lasted long enough to provoke it. This is untested, not passed. |
+| **R11** False criticals | **Materialised, and measured.** VSDLM calls 52.4% of mouths open against the inner-lip ratio's 18.3%, and the shipped pipeline raises YAWN on three dashcam clips in which nobody yawns. The `unreliable` flags and hysteresis that R11 prescribed are all in place and are not sufficient, because the underlying signal is miscalibrated on this footage. |
+| **R17** Ultralytics AGPL on the object net | **Retired.** YOLOX-Nano (Apache-2.0) replaced YOLOv8n. |
+| R2, R6, R7, R9, R10, R12, R13, R14, R15, R16 | Mitigations held; none observed to fire. |
+
+### Which Open Questions the build answered, and which it did not
+
+* **OQ-10 (AGPL on the object net) — answered.** YOLOX-Nano is Apache-2.0. The face
+  and landmark models remain InsightFace research terms and the gaze weights remain
+  Gaze360 non-commercial, so the licence position is: the *object* blocker is gone,
+  the *dataset* constraints on face and landmarks are not.
+* **OQ-3 (regulatory target) — answered by default.** Research/engineering prototype.
+  UNECE R171 and Euro NCAP remain explicit non-goals and no certification claim is
+  made anywhere in this repository.
+* **OQ-1 (camera hardware), OQ-2 (buzzer vs CAN), OQ-8 (LHD/RHD)** — unanswered and
+  unanswerable without hardware and a product decision. The nine per-clip ROI YAMLs
+  are nine YouTube framings and must never be mistaken for vehicle calibration.
+
+### What this design did not specify and the build needed anyway
+
+Recorded because a rev 6 should include them:
+
+1. **A gate that the running unit evaluates itself.** The design specifies the freeze
+   gate as a CI/manual check on `latency_budget.json`. In practice the gate has to be
+   computed in the frame loop and published, or an over-budget unit reports itself
+   healthy — which is exactly what happened until 2026-09-13.
+2. **Engine provenance covering *every* engine the config resolves to**, not the two
+   the app happened to hash. A capability registry that resolves backends at runtime
+   needs a matching `engines_to_verify(cfg)`, or the verification silently covers a
+   subset.
+3. **A per-alert coverage ledger.** "Every alert has a producer" is not the same
+   claim as "every alert has been observed to fire correctly", and the difference is
+   large enough to need its own artefact
+   (`tests/replay/golden/synthetic/alert_coverage.json`).
+4. **A vocabulary for model status that is not the word "live".** Real / weak /
+   fallback / disabled, with the measurement attached. Two engines on this board load,
+   run, and produce measurably poor output; "live" describes them as accurately as it
+   describes the face detector, which is the problem.
 
 ---
 

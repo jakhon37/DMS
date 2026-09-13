@@ -1,107 +1,277 @@
-# Status — 2026-09-13
+# Status — 2026-09-13 (revised 17:10 KST)
 
-Six workstreams (engines, models, runtime, ops, alerts, perf) landed, and this
-integration pass wired them into one running system. This document is the honest
-state of that system on this Xavier NX today.
+Six workstreams (engines, models, runtime, ops, alerts, perf) landed, an integration
+pass wired them into one running system, four adversarial reviewers then re-verified
+the result on this board and proved a list of defects, and a fix pass closed most of
+them. This document is the honest state of the system after that, on this Xavier NX,
+today.
+
+**Everything numeric below was re-measured between 16:45 and 17:10 KST on 2026-09-13,
+by running the commands written at the bottom of this file.** Nothing is carried over
+from an earlier revision, and nothing is taken from a workstream's self-report. The
+board was shared with other agents throughout (`/proc/loadavg` 2.6–4.0); that is
+recorded because it changes the answer.
 
 ## Verdict
 
-**A complete, integrated driver-monitoring pipeline that runs end to end on
-replay, with eleven real neural models and no stubs — and no vehicle evidence of
-any kind.** It is a credible v1 codebase. It is not a validated product.
+**A complete, integrated driver-monitoring pipeline that runs end to end on replay
+with nine TensorRT FP16 engines live in the frame loop — and no vehicle evidence of
+any kind.** It is a credible v1 codebase. It is not a validated product, it does not
+currently meet its own latency gate on most profiles, and two of its three drowsiness
+signals are measurably weak on the only footage available.
+
+A previous revision of this document claimed "eleven real neural models and no
+stubs". That was wrong twice over. **Nine engines deserialise in a run**; thirteen
+`.engine` files exist on disk. The Gaze360 engine is licence-gated off and is never
+deserialised, `hpe_mobilenetv3_small` is a fallback that loads only if the primary is
+absent, and `ocec_s_24x40` (batch 1) and `scrfd_500m_640` are alternates that no
+profile now selects. "No stubs" was also wrong: the eye and mouth channels carry
+documented EAR/MAR geometry fallbacks below their pixel floors, which is a good
+design and is not the absence of a fallback.
 
 | Working, measured | Missing or unproven |
 | --- | --- |
-| 11 TensorRT FP16 engines, hash-pinned, all live in the frame loop | No camera has ever been attached (`/dev/video*` absent) |
+| **Nine** TensorRT FP16 engines, every one sha256-verified at startup, all live in the frame loop | No camera has ever been attached (`/dev/video*` absent); `configs/production.yaml` cannot run here |
 | Media-time state machine, hysteresis, occlusion gating, honesty alerts | No calibration → every gaze alert is suppressed by design |
 | Supervised capture: reconnect ladder, `CAMERA_FAIL`, `/healthz` 503, watchdog withheld | Never exercised against a real camera unplug |
 | Durable `events.jsonl` (boot id, seq, fsync policy, ENOSPC handling) | Clip ring's GStreamer encode path still never executed |
-| `/healthz` `/livez` `/readyz` `/metrics`, ~40 Prometheus series | Health endpoint never scraped by anything but curl |
-| Golden replay over all nine clips, reproducible run to run | Goldens pin software behaviour, **not** ground truth |
-| Peak RSS 1376 MiB against a 5000 MiB gate | e2e p95 87.2 ms against a 66 ms gate — **fails** |
-| Strict config schema; the old broken EAR scale is now rejected by name | Thresholds are starting points, swept on no cabin footage |
+| `/healthz` `/livez` `/readyz` `/metrics`, ~40 Prometheus series + 5 new `dms_perf_gate_*` gauges | Health endpoint never scraped by anything but curl |
+| Golden replay runs over all nine clips and is reproducible run to run — and it is currently *catching* something | **3 of 9 clips are red today** (known cause, §"Golden replay"); the nine clip goldens pin 4 of 16 alert types and neither `MICROSLEEP` nor `PERCLOS_HIGH`, which a synthetic scripted-signal golden pins instead |
+| Peak RSS 1324–1387 MiB against a 5000 MiB gate | **e2e p95 fails the 66 ms gate on 8 of 11 runnable profiles** |
+| Strict config schema; the old broken EAR scale is rejected by name | Thresholds are starting points, swept on no cabin footage |
 | `deploy/` unit, logrotate, tmpfiles, staged installer | Never installed: `sudo` needs a password on this board |
+| The freeze gate is now *evaluated* every health refresh and published | Nothing has ever run for longer than 300 frames — no soak, ever |
+| Face detection, landmarks, head pose and identity all produce real output | The eye and mouth classifiers are measurably weak (§"Model status") |
 
-## What changed in this pass
+## Model status — what is real, what is weak, what is off
 
-1. **`dms/app.py` rewritten** around the pieces the other workstreams built:
-   `CaptureSupervisor`, `ModelRegistry`, a per-frame `DriverSignals`, the new
-   `DriverMonitor`, `LatencyBudget` stage timers, `EventLog`, `ClipRing`,
-   `HealthState`/`HealthServer`, `OverlayRenderer`. The unbounded `infer_ms`
-   list and its twice-a-second full sort are gone.
-2. **The time base is fixed.** The state machine runs on GStreamer buffer PTS for
-   file/test sources. Previously it ran on the consumer's wall clock, so every
-   duration threshold fired roughly three times too eagerly on replay and every
-   archived `events.jsonl` was timing-distorted.
-3. **A capture stall now produces alerts.** The loop advances the state machine on
-   frames that never arrive, so a frozen camera yields `FACE_LOST` instead of
-   silence.
-4. **`configs/production.yaml` is a vehicle config.** The verified defect —
-   `camera.fail_fatal: false` meaning "notify READY, ping the watchdog for ever,
-   never retry" — is fixed. See below.
-5. **The config schema is strict.** Every section forbids unknown keys; ~120 keys
-   the other workstreams read by name are now declared, range-checked and
-   documented. A config on the old EAR scale is refused with the reason.
-6. **Golden replay exists** (`tests/replay/golden/`), the Phase 1 exit criterion.
-7. **The calibration merge applies to every profile**, not only `default.yaml`
-   (DMS-P16), and the stale `configs/vehicle.yaml` — computed from the *wrong*
-   landmark topology — was emptied rather than carried forward.
+Classification, with the evidence for each. `state` is deliberately not the word
+"live", which reads as "working".
 
-## The camera-failure fix, demonstrated
+| Capability | Engine | State | Evidence |
+| --- | --- | --- | --- |
+| Face detection | `scrfd_500m_512` | **real** | 452 driver-face hits over 300 frames of `day_driver`, 1207 over `minivan`, measured today |
+| Landmarks | `2d106det_192` | **real** | drives EAR/MAR on the re-derived 106-point topology; open eyes read 0.21–0.40, closed below 0.15 |
+| Head pose | `hpe_mobilenetv2_224` | **real, uncalibrated** | runs every frame; no `forward_zero` exists, so every absolute angle is relative |
+| Eye open/closed | `ocec_s_24x40_b2` | **weak** | over 6350 eyes on this corpus only 16% reach the model path; on it, corr with the eye ratio is +0.29 while OCEC calls 3× as many eyes closed. Across all 6350 the correlation is −0.00 |
+| Mouth open/closed | `vsdlm_s_30x48` | **weak, miscalibrated** | 52.4% of mouths called open vs the inner-lip ratio's 18.3%, corr +0.14. Corroborated by today's golden run raising YAWN ×2 on `red_car_crash`, ×2 on `guy_rear_ended`, ×4 on `rear_end_whiplash` |
+| Sunglasses gate | `sgc_is_s_48` | **real on 2 of 4 positives** | re-measured today at the shipped 0.50 threshold: `bmw` 1.00, `family_vacation` 0.75, `getting_rear_ended` 0.28, `minivan` 0.14; all five negatives 0.00 |
+| Mask gate | `mwc_n_48` | **weak, positive class never exercised** | no clip contains a masked face; fires on 11% of `bmw_rear_ended` refreshes (bearded driver), 0.00 elsewhere |
+| Objects / phone | `yolox_nano_416` | **loaded, never exercised** | no clip contains a phone; no `PHONE` alert has ever fired from real footage |
+| Driver identity | `sface_112` | **real, and noisy** | 20 `driver_changed` edges over 300 frames of `day_driver`; it is what put 3 golden clips into regression |
+| Eye gaze | `mobilenetv2_gaze_448` | **disabled** | licence-gated (Gaze360, non-commercial); absent from the 9-engine provenance line |
 
-Run with `source.type: csi` on a board with no camera, `retry_forever: true`:
+The eye and mouth figures were measured by the model workstream on 2026-09-13 and are
+recorded in the `dms/infer/eyestate.py` and `dms/infer/mouthstate.py` docstrings; they
+were not re-run for this document. The sunglasses and mask figures **were** re-run for
+this document, and they disagree with `dms/infer/occlusion.py` on the two hard
+positives (that docstring records `minivan` 0.29 and `getting_rear_ended` 0.41 at
+threshold 0.50 where this measurement gives 0.14 and 0.28). Two plausible causes:
+`occlusion.py` was still being edited while the measurement ran, and the probe drives
+one persistent track id whereas the app's tracker restarts ids across a montage cut,
+which resets the 5-refresh vote window. Treat both sets as order-of-magnitude.
+
+## Changelog — what changed in this redevelopment
+
+*(This repository has no `CHANGELOG.md`. This section is the changelog entry for the
+redevelopment, and it is the place to add the next one.)*
+
+Beyond the integration work, this pass was driven by four adversarial reviews that
+re-verified every claim on this board and proved a list of defects with numerical
+repro scripts. In rough order of consequence:
+
+1. **The freeze gate is now actually evaluated.** It was computed only inside
+   `_write_budget()`, which returns immediately unless `DMS_LATENCY_BUDGET_OUT` is
+   set — so in normal operation nothing checked `perf.gate_e2e_p95_ms` and an
+   over-budget unit reported itself healthy. `DmsApp._evaluate_gate()` now runs at
+   every health refresh (2 Hz), publishes five `dms_perf_gate_*` gauges, writes a
+   note into `/healthz`, and sets `health.degraded` once a *decided* miss has
+   persisted 20 refreshes. Every run ends with one `PERF_GATE PASS|FAIL|UNDECIDED`
+   line. A window with too few samples is `undecided` and never counts as a pass.
+2. **Every engine is verified, not two of them.** `dms/app.py` carried a comment
+   saying the sha256 check was unconditional and "the only thing standing between a
+   swapped `.engine` and a safety decision", directly above a line that verified 2 of
+   the 9 engines the process loads. `engines_to_verify(cfg)` now mirrors the
+   registry's own resolution and hashes everything the run will deserialise; a
+   mismatch is fatal *before* READY regardless of `require_engines`, because a swapped
+   plan measurably reached READY and then killed the process with CUDA error 700.
+3. **`Letterbox` is wired into the frame loop and the shipped detector is SCRFD-512.**
+   `dms.runtime.preprocess.Letterbox` was a 349-line exported module no production
+   path used — only `scripts/bench.py` imported it, so the benchmark measured a
+   preprocessing stage the application did not have. It is now built from the SCRFD
+   engine's own input shape in `_setup_perception` and called from `_perceive`. All 12
+   profiles now point at `scrfd_500m_512_fp16_gpu.engine`. Together these are worth
+   roughly 10–15 ms of p50 (see the caveat in `readme.md` §7).
+4. **`FusionConfig`'s dataclass defaults were still on the old broken EAR scale**
+   (0.50 / 0.75), which `dms/config/schema.py` rejects by name — so any
+   `SignalFuser()` built without an `AppConfig` read every open eye as closed. It now
+   imports the geometry constants directly. The fusion layer also read half its
+   thresholds live and froze the other half at construction, so one frame could be
+   judged against two threshold generations; there is now one mechanism
+   (`_apply_cfg`, measured at 11.8 µs/call against 133 µs for the whole of `update()`).
+5. **The golden replay grew a synthetic drowsiness golden.** The nine clip fixtures
+   pin only 4 of 16 `AlertType` members, and `MICROSLEEP` and `PERCLOS_HIGH` — the two
+   alerts the product exists to raise — had zero end-to-end coverage.
+   `tests/replay/golden/synthetic/scripted_drive.json` replays a scripted 200 s
+   `DriverSignals` stream through the real `DriverMonitor` and pins exact per-type edge
+   counts. It proves the state machine, not perception, and
+   `tests/replay/golden/synthetic/alert_coverage.json` says so per type, including the
+   five types nothing pins at all.
+6. **Operator ergonomics.** `CLOCKS_LOW` no longer fires on the first frame of every
+   run (it now needs 60 frames and 20 clock samples). A missing engine file is logged
+   as `ENGINE_FAIL`, not `ENGINE_VERSION_MISMATCH ENGINE_FAIL`. A refused health bind
+   is reported as `health=disabled(bind refused)` in the READY line instead of
+   advertising an endpoint that is not there. `capture.letterbox` was declared in the
+   schema, set in all 12 profiles and read by no code at all; it is now a checked
+   declaration that logs `LETTERBOX_MISMATCH` when it disagrees with the engine.
+7. **Documentation claims that could not be reproduced were deleted or corrected.**
+   The specific ones, recorded so they are not reintroduced: "eleven real neural
+   models and no stubs" and "11 TensorRT FP16 engines … all live in the frame loop"
+   (nine deserialise); `docs/performance.md`'s Verdict row "`dms.app` as shipped
+   today, 2 engines, 8.6 FPS, FAIL by 1.8x" (a two-engine app that no longer existed,
+   pessimistic by ~2x, and contradicting `readme.md` on the same day); the same
+   table's "optimised512 … 28.4 FPS … pass, 24 ms margin" row (a `scripts/bench.py`
+   *partial-pipeline* microbenchmark — detector plus landmarks only — presented beside
+   a whole-system gate verdict with no label); the model table's "live" against the
+   sunglasses and mask gates (one finds two of four positives well, the other has
+   never seen a positive); `dms/app.py`'s comment that the hash check was "the only
+   thing standing between a swapped `.engine` and a safety decision" above a line
+   verifying 2 of 9; and `dms/state/driver_state.py`'s claim that `dms/app.py` still
+   passes raw floats (both of its call sites pass `signals=`).
+
+8. **The earlier integration fixes stand**: media-time state machine on buffer PTS,
+   a capture stall producing `FACE_LOST` rather than silence, `configs/production.yaml`
+   as a real vehicle config, a strict schema, and the calibration merge applying to
+   every profile.
+
+## Measured, this board, 2026-09-13 16:45–17:10 KST
+
+### The spread matters more than any single number
+
+`configs/default.yaml`, the same 300 frames of `day_driver.mp4`, three runs inside one
+hour:
+
+| run | e2e p50 | e2e p95 | FPS | verdict |
+| --- | ---: | ---: | ---: | --- |
+| first of an eleven-profile sweep | — | 79.96 (rolling; set `health.degraded`) | — | **FAIL** |
+| standalone | 42.0 ms | **65.3 ms** | 21.3 | **PASS** by 0.7 ms |
+| standalone, immediately after | 45.4 ms | **72.7 ms** | 20.3 | **FAIL** |
+
+The run-to-run spread exceeds the margin. No PASS taken on this shared board is a
+property of the software. `CLOCKS_LOW` fired during the sweep at a peak GPU clock of
+**204 MHz** against an 1109 MHz ceiling.
+
+### Every profile, one sweep, 300 frames each
+
+| profile | e2e p50 | e2e p95 | FPS | peak RSS | face hits | gate |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `testsrc` | 33.1 | 34.8 | 30.0 | 1324 MiB | 0 | **PASS** |
+| `systemd-lab` | 33.2 | 35.1 | 29.6 | 1339 MiB | 0 | **PASS** |
+| `rear_end_accident` (186 fr) | 42.0 | 65.2 | 23.1 | 1368 MiB | 292 | **PASS** |
+| `default` | 42.0 | 65.3 | 21.3 | 1366 MiB | 452 | PASS/FAIL, see above |
+| `bmw_rear_ended` | 43.7 | 68.1 | 19.8 | 1385 MiB | 300 | FAIL |
+| `rear_end_whiplash` | 42.2 | 68.7 | 21.8 | 1387 MiB | 540 | FAIL |
+| `red_car_crash` | 48.6 | 71.3 | 18.9 | 1363 MiB | 300 | FAIL |
+| `guy_rear_ended` | 46.3 | 76.3 | 18.9 | 1372 MiB | 300 | FAIL |
+| `family_vacation_crash` | 50.8 | 78.5 | 18.1 | 1375 MiB | 565 | FAIL |
+| `minivan` | 49.5 | 78.6 | 17.8 | 1370 MiB | 1207 | FAIL |
+| `getting_rear_ended` | 46.3 | 79.7 | 18.5 | 1370 MiB | 589 | FAIL |
+| `production` | — | — | — | — | — | **not runnable** (`csi`, no camera) |
+
+**3 PASS, 8 FAIL, 1 unrunnable.** The two comfortable passes render a synthetic
+pattern and find zero faces, so they never exercise the per-face cascade. Of the
+profiles that do real work, only the shortest clip passed, and by 0.8 ms.
+
+The other two halves of the contract are met everywhere: **17.8–30.0 FPS** against a
+≥ 15 FPS target, and **peak RSS 1324–1387 MiB** against a 5000 MiB limit — 27% of
+budget.
+
+### Engines actually deserialised
+
+Parsed from the `loaded …/engines/…` log lines of a real run, not from the manifest:
 
 ```
-CAMERA_FAIL unexpected EOS on a live source - reconnect attempt 1/5 in 0.5 s
-...                                         - reconnect attempt 5/5 in 5.0 s
-CAMERA_FAIL ... - 7 consecutive failures, camera=failed (still retrying)
+engine provenance: 9 engines verified in 0.10s (require_hash=False):
+  2d106det_192, hpe_mobilenetv2_224, mwc_n_48, ocec_s_24x40_b2, scrfd_500m_512,
+  sface_112, sgc_is_s_48, vsdlm_s_30x48, yolox_nano_416
+
+model registry: {'headpose': 'model', 'eyestate': 'model', 'mouthstate': 'model',
+                 'occlusion': 'model', 'gaze': 'off', 'objects': 'model',
+                 'identity': 'model'}
 ```
 
-```
-GET /healthz -> 503   {"ok": false, "camera": "retrying", "degraded": true, ...}
-GET /livez   -> 200
-GET /readyz  -> 503
-dms_camera_up 0
-dms_alerts_enter_total{type="camera_fail",severity="critical"} 1
-```
+Thirteen `.engine` files exist. Nine run. The four that do not:
+`mobilenetv2_gaze_448` (licence-gated off), `hpe_mobilenetv3_small_224` (fallback),
+`ocec_s_24x40` (batch-1 alternate), `scrfd_500m_640` (superseded by the 512).
 
-One `camera_fail` CRITICAL edge in `events.jsonl` (an edge, not a flood), the
-process stays alive and self-heals, and `WATCHDOG=1` is withheld while no frames
-arrive, so `WatchdogSec` escalates a permanently dead camera to a unit restart.
-
-## Measured, this board, 2026-09-13
-
-`configs/default.yaml`, 300 frames, all nine heads, overlay off, GPU governor at
-its 114 MHz idle floor, board shared with other work:
+### Test suite
 
 ```
-e2e p50 58.6 ms   e2e p95 87.2 ms   16.2 FPS   peak RSS 1376 MiB
-unaccounted 1.1 ms of 60.9 ms mean  (the stage table covers the loop)
-stages p50: detect_gpu 17.0  headpose 13.4  landmarks 9.6  letterbox 9.3
-            detect_post 3.6  fusion 0.6  track 0.4  capture 0.15  bgra 0.014
+flock /tmp/jetson-gpu.lock -c "PYTHONPATH=. ./.venv/bin/python -m pytest -q"
+-> 763 passed, 7 skipped in 84.04s
 ```
 
-`capture_lag` p50 is 118 ms: on a file source the decoder runs ahead of the
-consumer and frames sit in the appsink queue. That is expected on replay and is
-**not** a live-capture latency figure.
+Zero failures. The long-standing
+`test_the_legacy_geometry_call_path_still_drives_the_machine` failure named in the
+previous revision of this document is fixed: the fixture fed `ear=0.20` and expected
+`MICROSLEEP`, but on the corrected EAR scale 0.20 is an **open** eye, so the machine
+was right and the fixture was stale. It now drives a genuinely closed eye and reads
+the effective threshold off the monitor rather than assuming one, with a companion
+test that fails loudly on the next recalibration.
 
-Golden replay, nine clips, two consecutive runs: identical detection counts and
-identical alert counts, all within band.
+### Golden replay — 6 of 9 green, 3 red
 
-## The three biggest open items
+```
+REGRESSION day_driver:        driver_changed/enter fired 10 times, golden band [1, 3]
+REGRESSION day_driver:        driver_changed/exit  fired 10 times, golden band [1, 3]
+REGRESSION rear_end_accident: driver_changed/enter fired  3 times, golden band [4, 6]
+REGRESSION rear_end_accident: driver_changed/exit  fired  3 times, golden band [4, 6]
+REGRESSION rear_end_whiplash: NEW alert driver_changed/enter        (not in the golden)
+REGRESSION rear_end_whiplash: NEW alert driver_changed/exit         (not in the golden)
+REGRESSION rear_end_whiplash: NEW alert drowsiness_unreliable/exit  (not in the golden)
+7 regression(s)
+```
 
-1. **Latency.** 87 ms p95 against a 66 ms gate. The pipeline is dominated by the
-   Python data path and TensorRT host overhead, not by the networks: `detect_gpu`
-   is 17 ms of wall time around 3.7 ms of GPU compute. The fixes are known,
-   quantified, and in files this workstream does not own.
-2. **No cabin footage.** Every threshold in the fusion layer and every band in the
-   golden fixtures is a starting point. Two driver-facing clips with labelled
-   events (3 × eyes closed ≥ 2 s, 3 × yawns, 3 × over-shoulder looks) would turn
-   the whole alert layer from plausible into measured.
-3. **No calibration and no camera.** Until a `forward_zero` is measured in a real
-   seat, gaze alerts are unreachable and every absolute head angle is relative.
+`minivan`, `red_car_crash`, `family_vacation_crash`, `guy_rear_ended`,
+`bmw_rear_ended` and `getting_rear_ended` are `ok`.
 
-## Reproduce in five minutes
+**The cause is known and the fixtures have deliberately not been re-recorded.** They
+were recorded at `2026-09-13T01:36–01:40Z` (10:36–10:40 KST).
+`dms/runtime/preprocess.py` was modified at 14:07, `dms/app.py` at 14:30 and
+`configs/*.yaml` at 14:32 — the `Letterbox` rewiring and the SCRFD 640 → 512 swap,
+both landing *after* the baseline was taken. A different detector at a different input
+size finds different faces, which moves track ids, which is what `driver_changed`
+counts. The golden is doing exactly its job. Re-recording it would launder an
+unreviewed perception change into the baseline; whoever owns the 512 decision should
+read the diff and re-record deliberately, with a note.
+
+## The four biggest open items
+
+1. **Latency, and the fact that the measurement is not repeatable.** 8 of 11
+   runnable profiles fail the 66 ms p95 gate, and the profile measured three times
+   spanned 65.3 → 79.96 ms. Two of the three known fixes are now applied
+   (`Letterbox`, SCRFD-512); the third (per-engine CUDA event reuse in
+   `dms/runtime/trt_engine.py`, ~6 ms) is not. Beyond that the honest next step is
+   not another micro-optimisation, it is **locking the GPU clock and re-measuring on
+   an idle board** — the governor was observed at 204 MHz here against an 1109 MHz
+   ceiling, and locking it needs root, which this environment does not have.
+2. **No cabin footage, and two weak drowsiness models.** Every threshold in the
+   fusion layer and every band in the golden fixtures is a starting point. The eye
+   classifier reaches its model path on 16% of eyes here; the mouth classifier calls
+   half of all mouths open. Two driver-facing clips with labelled events (3 × eyes
+   closed ≥ 2 s, 3 × yawns, 3 × over-shoulder looks) would turn the whole alert layer
+   from plausible into measured. This is the single highest-value missing artefact in
+   the project and it cannot be produced by writing code.
+3. **No camera, no calibration, no soak, no systemd.** Until a `forward_zero` is
+   measured in a real seat, gaze alerts are unreachable and every absolute head angle
+   is relative. Nothing has ever run longer than 300 frames. The unit has never been
+   loaded.
+4. **The golden baseline is stale against the shipped detector.** Three clips are red
+   for a good reason; leaving them red is correct, but it means the regression harness
+   is not currently a clean signal, and the decision to adopt SCRFD-512 has not been
+   reviewed against its detection-quality cost.
+
+## Reproduce in ten minutes
 
 ```bash
 cd /home/nvidia/myspace/DMS
@@ -111,27 +281,16 @@ flock /tmp/jetson-gpu.lock -c "PYTHONPATH=. ./.venv/bin/python -m dms.app --conf
 flock /tmp/jetson-gpu.lock -c "PYTHONPATH=. ./.venv/bin/python tests/replay/golden/run_golden.py"
 ```
 
-## Known test failure
+Run the third one **twice** and compare. If the two `PERF_GATE` lines disagree, that
+is the finding, not a fluke.
 
-`tests/test_state.py::test_the_legacy_geometry_call_path_still_drives_the_machine`
-fails. It feeds `ear=0.20` and expects `MICROSLEEP`; on the corrected EAR scale
-0.20 is an **open** eye (open reads 0.21–0.40, closed below 0.15), so the machine
-is right and the fixture is stale. The test's `mon.fusion_cfg.ear_closed = 0.50`
-lines are a no-op — `SignalFuser` snapshots its thresholds into `SchmittLatch`
-objects at construction — so the test only ever passed because the *config
-default* used to be the broken-scale 0.50/0.75.
-
-Verified fix (all 61 tests in that file pass with it), in a file this workstream
-does not own:
-
-```
-tests/test_state.py:869  ear=0.20  ->  ear=0.10
-tests/test_state.py:873  approx(0.20)  ->  approx(0.10)
-```
+Check the board's load first (`cat /proc/loadavg`) and record it beside any number you
+keep. Every figure in this document was taken at loadavg 2.6–4.0.
 
 ## Local artifacts (not in git)
 
 - `engines/*.engine`, `engines/*.onnx` — `bash scripts/fetch_onnx.sh && python3 scripts/build_engines.py`
 - `tests/replay/*.mp4` — catalogue in [`../tests/replay/CLIPS.md`](../tests/replay/CLIPS.md)
 - `tests/replay/golden/*.json` — **committed**; the regression baseline
+- `tests/replay/golden/synthetic/*.json` — **committed**; the scripted drowsiness golden and the per-alert coverage ledger
 - `data/events.jsonl` — lab alert log

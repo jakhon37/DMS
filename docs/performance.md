@@ -1,57 +1,140 @@
 # DMS performance on the Xavier NX
 
-Every number in this document was measured on the target board, by
-`scripts/bench.py` or `scripts/run_all_replay.py`, on 2026-09-13. Nothing here
-is estimated, scaled from another device, or copied from a datasheet. Where a
-number is uncertain the uncertainty is stated; where something has not been
-measured it says so.
+**Two dates, and the difference between them matters.** Sections 3 to 12 of this
+document are microbenchmarks taken by `scripts/bench.py` and `scripts/run_all_replay.py`
+on **2026-09-13 morning**, against the application as it stood *then*. Section 1 and
+section 2 were re-taken from the **shipped application** on **2026-09-13 between 16:45
+and 17:10 KST**, after two of the three optimisations this document used to recommend
+were actually merged. Where a later section describes the old code path it now says
+so inline.
+
+Nothing here is estimated, scaled from another device, or copied from a datasheet.
+Where a number is uncertain the uncertainty is stated; where something has not been
+measured it says so. **Where a bench-harness profile is quoted, the row names the
+harness** — `scripts/bench.py` synthetic profiles are not `dms.app`, and an earlier
+revision of this file put the two in one table without saying which was which.
 
 **Board.** Jetson Xavier NX, L4T R35.6.5 / JetPack 5.1.6, Ubuntu 20.04, 6 Carmel
 cores, `nvpmodel` profile `pmode:0008` (MODE_20W_6CORE), CUDA 11.4,
 TensorRT 8.5.2.2, OpenCV 4.5.4 (GStreamer yes, CUDA no, TBB, 6 threads),
 Python 3.8.10. GPU devfreq governor `nvhost_podgov`, 114.75-1109.25 MHz.
 6.7 GiB RAM, no camera - everything is replay of local 1280x720 mp4 clips.
+**The board is shared with other agents.** Every afternoon figure was taken at
+`/proc/loadavg` 2.6-4.0, and that is recorded per measurement because it changes the
+answer by more than the gate's margin.
 
 **The gate.** `docs/production-dms-design.md`: 1280x720 end-to-end **p95 <= 66 ms**
-(>= 15 FPS) with **peak RSS < 5.0 GB**.
+(>= 15 FPS) with **peak RSS < 5.0 GB**. As of this revision the application
+**evaluates that gate itself** at every health refresh and prints one
+`PERF_GATE PASS|FAIL|UNDECIDED` line per run; it used to be computed only inside
+`_write_budget()`, which returns immediately unless `DMS_LATENCY_BUDGET_OUT` is set,
+so in normal operation nothing checked it and an over-budget unit reported itself
+healthy.
 
 ---
 
-## 1. Verdict
+## 1. Verdict — the shipped application, measured this afternoon
 
-| configuration | e2e p50 | e2e p95 | FPS | gate |
-|---|---:|---:|---:|---|
-| `dms.app` as shipped today, headless flags, 2 engines | - | - | **8.6** | **FAIL by 1.8x** |
-| `dms.app` as shipped today, `--save-video --save-preview` | - | - | **5.2** | **FAIL by 2.9x** |
-| core pipeline (SCRFD-640 + 2d106det), CPU fixes applied | 39.2 ms | 60.5 ms | 23.3 | pass |
-| core pipeline (SCRFD-512 + 2d106det), CPU fixes applied | **33.6 ms** | **41.7 ms** | **28.4** | **pass, 24 ms margin** |
-| all nine engines (eight capabilities), every head on every frame | 72.5 ms | 94.7 ms | 13.2 | **FAIL** |
-| nine engines, cadenced, object net every 10th frame | 44.2 ms | 77.6 ms | 20.3 | **FAIL** |
-| nine engines, cadenced, object net every 20th frame (section 8) | **37.3 ms** | **62.2 ms** | **24.6** | **pass** |
+Two of the three fixes this document used to recommend **are now in the shipped
+path**, and the numbers below are the shipped path, not a harness:
 
-Peak RSS never exceeded **2.0 GiB** in any configuration measured, against a
-5.0 GB limit. **The memory half of the gate passes with 60% headroom. The
-latency half does not pass today and is not a matter of tuning: the shipped code
-spends more time on avoidable CPU copies than on all inference combined.**
+* `dms.runtime.preprocess.Letterbox` is built from the SCRFD engine's own input shape
+  in `DmsApp._setup_perception` and called from `_perceive` (`dms/app.py:876`).
+  `ScrfdDetector.preprocess` is now only a fallback.
+* Every profile ships `engines/scrfd_500m_512_fp16_gpu.engine`.
+* The cadences recommended in section 8 are shipped: `occlusion.every_n: 15`,
+  `objects.every_n: 20`.
+* Per-engine CUDA event reuse in `dms/runtime/trt_engine.py` is **still not applied**
+  (`grep -c 'cudaEventCreate\|_event_pool\|_events'` returns 0).
+* The overlay bug (`if want_overlay or not health.degraded:`) is gone — `want_overlay`
+  no longer appears in `dms/app.py` at all.
 
-Three statements, each backed by a measurement below:
+### The headline is the spread, not a number
 
-1. **15 FPS with the core pipeline is comfortably reachable** - 28.4 FPS
-   measured with the 512 detector - but only after the CPU work described in
-   section 5, none of which is in files this workstream owns.
-2. **15 FPS with all nine engines running on every frame is not reachable.**
-   72.5 ms p50 / 94.7 ms p95 measured. It is not close, and no amount of tuning
-   inside the wrappers closes a 29 ms gap.
-3. **15 FPS with all nine engines at sensible cadences is reachable**, and the
-   single decision that makes it so is the object net's period. Measured back to
-   back in one session, on the same clip, with only that period changed:
-   every 10th frame gives 44.2 ms p50 / **77.6 ms p95** (fail); every 20th frame
-   gives 37.3 ms p50 / **62.2 ms p95** (pass), 24.6 FPS. The margin is 4 ms and
-   this board is shared, so section 8 also lists what buys more of it.
+`configs/default.yaml`, 300 frames of `day_driver.mp4`, three runs inside one hour:
+
+| run | e2e p50 | e2e p95 | FPS | verdict |
+| --- | ---: | ---: | ---: | --- |
+| first of an eleven-profile sweep | - | 79.96 (rolling window; set `health.degraded`) | - | **FAIL** |
+| standalone | 42.0 ms | **65.3 ms** | 21.3 | **PASS** by 0.7 ms |
+| standalone, immediately after, same session | 45.4 ms | **72.7 ms** | 20.3 | **FAIL** |
+
+**The run-to-run spread on this board is larger than the margin the gate is judged
+by.** That is the single most important performance fact in this document, and it is
+consistent with section 3: `CLOCKS_LOW` fired during the sweep at a peak GPU clock of
+**204 MHz** against an 1109 MHz ceiling. Any single number quoted for this pipeline is
+a sample from that distribution.
+
+### Every shipped profile, `dms.app`, 300 frames, one sweep
+
+| profile | e2e p50 | e2e p95 | FPS | peak RSS | face hits | gate |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `testsrc` | 33.1 | 34.8 | 30.0 | 1324 MiB | 0 | **PASS** |
+| `systemd-lab` | 33.2 | 35.1 | 29.6 | 1339 MiB | 0 | **PASS** |
+| `rear_end_accident` (186 fr) | 42.0 | 65.2 | 23.1 | 1368 MiB | 292 | **PASS** |
+| `default` | 42.0 | 65.3 | 21.3 | 1366 MiB | 452 | PASS / FAIL, above |
+| `bmw_rear_ended` | 43.7 | 68.1 | 19.8 | 1385 MiB | 300 | FAIL |
+| `rear_end_whiplash` | 42.2 | 68.7 | 21.8 | 1387 MiB | 540 | FAIL |
+| `red_car_crash` | 48.6 | 71.3 | 18.9 | 1363 MiB | 300 | FAIL |
+| `guy_rear_ended` | 46.3 | 76.3 | 18.9 | 1372 MiB | 300 | FAIL |
+| `family_vacation_crash` | 50.8 | 78.5 | 18.1 | 1375 MiB | 565 | FAIL |
+| `minivan` | 49.5 | 78.6 | 17.8 | 1370 MiB | 1207 | FAIL |
+| `getting_rear_ended` | 46.3 | 79.7 | 18.5 | 1370 MiB | 589 | FAIL |
+| `production` | - | - | - | - | - | **not runnable** (`csi`, no camera on this board) |
+
+**3 PASS, 8 FAIL, 1 unrunnable.** The two comfortable passes render a synthetic
+pattern and find zero faces, so they exercise capture, the engines and the loop but
+not the per-face cascade. Of the profiles that do real work, only the shortest clip
+passed, and by 0.8 ms.
+
+The memory half of the gate passes everywhere with 73% of headroom: **peak RSS
+1324-1387 MiB against 5000 MiB**. The FPS half passes everywhere:
+**17.8-30.0 FPS against >= 15**.
+
+### What the two applied fixes were worth
+
+The previous revision of this section reported `configs/default.yaml` at
+**58.6 ms p50 / 87.2 ms p95 / 16.2 FPS** with the 640 detector and no `Letterbox`.
+Today the same profile measures **42.0-45.4 ms p50 / 65.3-72.7 ms p95 at 20.3-21.3
+FPS**. That is roughly **14 ms of p50**, but the two measurements were taken in
+different board conditions, so the honest form of the claim is "the two changes are
+worth something in the neighbourhood of 10-15 ms of p50", not a delta.
+
+### What this section used to say, and why it was wrong
+
+Recorded so the same error is not reintroduced. The previous Verdict table said:
+
+* "`dms.app` as shipped today, headless flags, 2 engines | **8.6** FPS | **FAIL by
+  1.8x**". That row described a two-engine application that no longer existed when it
+  was written; the app loads nine engines and measures 17.8-30.0 FPS. The row was
+  wrong by roughly 2x in the pessimistic direction and contradicted `readme.md` in the
+  same repository, with both documents dated the same day.
+* "core pipeline (SCRFD-512 + 2d106det), CPU fixes applied | 33.6 ms | 41.7 ms |
+  **28.4** | **pass, 24 ms margin**". That is a `scripts/bench.py` **partial-pipeline
+  microbenchmark** — detector plus landmarks only — presented immediately beside a
+  whole-system gate verdict, with no label saying so. Even now that the CPU fixes are
+  merged, the whole application does not reach 28.4 FPS on a real clip and has nothing
+  like 24 ms of margin. Those rows have been moved into section 6 where the harness
+  and the profile definitions are, and they are labelled there.
 
 ---
 
 ## 2. Reproducing this
+
+**The application measurements in section 1** (the only ones that describe the shipped
+product) come from running the app directly, twice, and comparing:
+
+```bash
+flock /tmp/jetson-gpu.lock -c \
+  "PYTHONPATH=. ./.venv/bin/python -m dms.app --config configs/default.yaml --max-frames 300"
+```
+
+Each run ends with one `PERF_GATE PASS|FAIL|UNDECIDED ...` line followed by
+`stopped frames=... e2e_p50_ms=... e2e_p95_ms=... fps=...`. Record
+`cat /proc/loadavg` beside whatever you keep. **If two consecutive runs disagree about
+the verdict, that is the result, not a fluke.**
+
+**The microbenchmarks in sections 3-10** come from the bench harness:
 
 ```bash
 # CPU-only sections; no GPU, no lock needed
@@ -237,13 +320,20 @@ Four findings, in order of size:
    27.2 ms, because it still allocates its output - preallocation, not the C++
    inner loop, is where the win is.
 4. **The overlay ran on every frame in the headless configuration** because
-   `dms/app.py:243` reads `if want_overlay or not health.degraded:` where `and`
+   `dms/app.py:243` read `if want_overlay or not health.degraded:` where `and`
    was meant. That is 30.3 ms per frame of drawing that is immediately
-   discarded, and it also inverts the intent: the overlay was drawn *only* when
-   the board was **not** thermally degraded.
+   discarded, and it also inverted the intent: the overlay was drawn *only* when
+   the board was **not** thermally degraded. **FIXED** — `dms/app.py` was rewritten
+   and the identifier `want_overlay` no longer appears in it at all.
 
-**Accounting for the 116.8 ms/frame that `dms.app` actually costs today**
-(day_driver, 200 frames, no overlay flags, measured wall clock):
+**Accounting for the 116.8 ms/frame that `dms.app` cost at the time of this
+measurement** (day_driver, 200 frames, no overlay flags, measured wall clock).
+
+> **Stale as of 2026-09-13 afternoon.** This breakdown describes the pre-`Letterbox`,
+> SCRFD-640, overlay-always-drawn application. The shipped app measures 42.0-50.8 ms
+> p50 today (section 1). The table is kept because the *shape* of the finding is still
+> right — the networks are not the cost — and because it is the only line-by-line
+> accounting that exists. Do not quote its absolute numbers as current.
 
 | item | ms/frame | how it was measured |
 |---|---:|---|
@@ -263,7 +353,16 @@ not use it yet.
 
 ---
 
-## 6. Assembled pipeline
+## 6. Assembled pipeline (`scripts/bench.py`, NOT `dms.app`)
+
+> **Read the profile definitions in section 2 before quoting any row here.** These
+> are bench-harness profiles. `current`, `optimised` and `optimised512` are the
+> **detector + landmarks core only**; only `full512` and `production` include the
+> seven capability heads. None of them is the application: they do not run the state
+> machine, the event log, health, or the capture supervisor. For what `dms.app`
+> actually measures, see section 1. The two rows an earlier revision of this document
+> put in its Verdict table — `optimised512` at 33.6/41.7/28.4 and `production` at
+> 39.3/66.3/22.6 — are in the table below, where they belong.
 
 `--sections pipeline --frames 150`, `day_driver.mp4`, all five profiles in one
 process so they are directly comparable (bench tag `final-01`; the board carried
@@ -329,7 +428,20 @@ loadavg 1.9, and the **p50 delta of -5.6 ms is the figure to plan with** - a
 quieter session (`cad-core`) put the 512 core pipeline at 32.7 ms p50 / 43.3 ms
 p95, consistent with the p50 but not with an 18.7 ms p95 saving.
 
-**Recommendation: ship the 512 engine.** It costs 5.6 ms of p50 for the whole
+**Recommendation: ship the 512 engine. — DONE, 2026-09-13 afternoon.** All twelve
+profiles now point at `engines/scrfd_500m_512_fp16_gpu.engine`. Two consequences that
+this section's latency-only framing did not anticipate, and that a reader must have:
+
+* The nine golden replay fixtures were recorded against the **640** detector at
+  10:36-10:40 KST, before the swap. **3 of the 9 are now red** — `day_driver`,
+  `rear_end_accident` and `rear_end_whiplash`, all on `driver_changed` edge counts,
+  because a different detector at a different input size finds different faces and
+  therefore moves track ids. That is the accuracy half of the trade arriving late and
+  through the regression harness rather than through a recall study.
+* The accuracy half still has not been done properly. See the caveat below, which
+  still stands.
+
+Why it was recommended: It costs 5.6 ms of p50 for the whole
 pipeline - far more than the 1.35 ms the
 engine-alone comparison suggests, because the decode also shrinks (8192/2048/512
 anchor rows instead of 12800/3200/800) and the smaller preprocess and smaller
@@ -386,12 +498,17 @@ configuration with the object net at every 10th frame instead measured 44.2 /
 77.6 / 20.3 in the immediately preceding run - the period is worth 15.4 ms of
 p95 on its own.
 
-**Honest conclusion.** With the CPU fixes and these cadences the pipeline passes
-the 66 ms p95 gate with **3.8 ms of margin** and passes the 15 FPS gate with 64%
-of margin, at 40% of the RSS limit. Four milliseconds is not a comfortable
-latency margin on a board whose GPU clock has been observed to move an identical
-inference by 5.2x, so at least one of the following should be done before the
-gate is called met, in order of preference:
+**Honest conclusion, and what happened next.** In this harness, with the CPU fixes
+and these cadences, the pipeline passed the 66 ms p95 gate with **3.8 ms of margin**.
+That conclusion was correct about the harness and wrong as a prediction about the
+product. The cadences and the CPU fixes are now shipped, and the **application**
+measures 3 PASS / 8 FAIL across the eleven runnable profiles (section 1), with the one
+profile measured three times spanning 65.3 to 79.96 ms p95.
+
+The margin was the problem, exactly as this paragraph warned: four milliseconds is not
+a comfortable latency margin on a board whose GPU clock has been observed to move an
+identical inference by 5.2x, and whose six cores are shared. At least one of the
+following should be done before the gate is called met, in order of preference:
 
 1. **Move the object net off the frame thread.** At 23-29 ms it is 60% of the
    p95 spike and it is the only head whose result is not needed within one
@@ -418,13 +535,13 @@ owns the file - none of the top four are in `dms/perf`, `dms/viz` or `scripts/`.
 | # | change | measured saving | effort | owner |
 |---:|---|---:|---|---|
 | 1 | Stop writing MJPG video during timing runs; when a video is genuinely wanted, write it at 360p | **-76.8 ms** (720p) / -56 ms (360p instead of 720p) | S | done - `run_all_replay.py --no-overlay`; the app's `--save-video` remains a debug flag |
-| 2 | Fix `if want_overlay or not health.degraded:` to `and`, and take the overlay through `OverlayRenderer` | **-30.3 ms** | S | `dms/app.py` (integrator) |
-| 3 | Replace `ScrfdDetector.preprocess` with `dms.runtime.preprocess.Letterbox` | -35 ms standalone, **-16.7 ms in-pipeline** (with #4) | M | `dms/infer/scrfd.py` (perception) |
-| 4 | Convert BGRA->BGR once per frame with `cvtColor` into a reused buffer; never pass the stride-4 view downstream | **-9.6 ms** on landmarks, and it is what makes #3 achievable | M | `dms/app.py` + `dms/infer/*` |
-| 5 | Ship the 512 detector engine instead of the 640 | **-5.6 ms p50** (p95 saving seen once at -18.7 ms; do not plan on it) | S | `configs/*.yaml` |
-| 6 | Run the object net every 20th frame with a staggered phase (or move it to a second thread) | **-15.4 ms p95**, measured back to back | S | `configs/*.yaml` `objects.every_n` |
+| 2 | Fix `if want_overlay or not health.degraded:` to `and`, and take the overlay through `OverlayRenderer` | **-30.3 ms** | S | **DONE** — `dms/app.py` rewritten; `want_overlay` no longer exists |
+| 3 | Replace `ScrfdDetector.preprocess` with `dms.runtime.preprocess.Letterbox` | -35 ms standalone, **-16.7 ms in-pipeline** (with #4) | M | **DONE, differently than proposed** — `DmsApp._setup_perception` builds `Letterbox.for_scrfd` from the engine's own input shape and `_perceive` calls it; `dms/infer/scrfd.py` was not touched and its allocating `preprocess` survives as the fallback for external callers |
+| 4 | Convert BGRA->BGR once per frame with `cvtColor` into a reused buffer; never pass the stride-4 view downstream | **-9.6 ms** on landmarks, and it is what makes #3 achievable | M | **DONE** — the app holds a contiguous BGR frame |
+| 5 | Ship the 512 detector engine instead of the 640 | **-5.6 ms p50** (p95 saving seen once at -18.7 ms; do not plan on it) | S | **DONE** in all 12 profiles — and it put 3 golden fixtures into regression; see section 7 |
+| 6 | Run the object net every 20th frame with a staggered phase (or move it to a second thread) | **-15.4 ms p95**, measured back to back | S | **DONE** — `objects.every_n: 20`, `occlusion.every_n: 15` in every profile |
 | 7 | Lock the GPU clock for timing runs and report the gate at both clocks | up to 5.2x on one engine between 114 and 510 MHz; est. 5-8 ms/frame, not directly measurable without root | S | operator/systemd, not the app |
-| 8 | Create each engine's completion event once with `cudaEventDisableTiming` instead of create+destroy per inference | not isolated; the total host-over-GPU overhead it sits inside is 0.27-3.02 ms per engine, ~6 ms/frame across six small heads | S | `dms/runtime/trt_engine.py` (runtime) |
+| 8 | Create each engine's completion event once with `cudaEventDisableTiming` instead of create+destroy per inference | not isolated; the total host-over-GPU overhead it sits inside is 0.27-3.02 ms per engine, ~6 ms/frame across six small heads | S | **STILL OPEN** — `dms/runtime/trt_engine.py`; `grep -c 'cudaEventCreate\|_event_pool\|_events'` returns 0 as of 2026-09-13 17:00 |
 | 9 | Pin `cv2.setNumThreads` | not measured - see section 12 | S | `dms/app.py` |
 | 10 | Async submit/wait overlap of the detector with the previous frame's post-processing | not measured; upper bound is the 13.2 ms `detect_gpu` stage | L | `dms/app.py` + `dms/runtime` |
 
@@ -439,9 +556,9 @@ owns the file - none of the top four are in `dms/perf`, `dms/viz` or `scripts/`.
 * **DLA.** `2d106det` is MobileNet-0.5 with PReLU, which TRT 8.5's DLA does not
   support, so the layer audit will reject it; and it is 1.08 ms of GPU compute.
   The `dla_core` parameter exists in `TrtEngine` and is now honoured, but no DLA
-  engine has ever been built and the payoff is a rounding error. The
-  `models.landmarks.dla_engine` key in every config file points at a file that
-  does not exist and should be removed.
+  engine has ever been built and the payoff is a rounding error. The dead
+  `models.landmarks.dla_engine` key **has since been removed** from the configs and
+  the schema.
 * **Batching the small heads.** Tempting - six heads pay ~6 ms of fixed submit
   overhead - but they have different input shapes and different crops, so a
   single batched engine would have to be built as one graph. Not worth it before
@@ -531,39 +648,51 @@ up the gate verdict automatically. Until then the field is simply absent.
 
 ## 11. What the frame loop still has to do
 
-`dms/app.py` is not owned by this workstream. The tooling is built and tested;
-the loop does not call it. In priority order:
+Six items were listed here. As of 2026-09-13 afternoon, **five are done**, verified by
+reading `dms/app.py`:
 
-1. `bgr = frame.full_bgra[..., :3]` -> `bgr = self._to_bgr(frame.full_bgra)`
-   using `dms.runtime.preprocess.BgraToBgr`. Everything else depends on this.
-2. `if want_overlay or not health.degraded:` -> an `OverlayRenderer` built from
-   the three flags; guard `preview = vis` and `writer.write(vis)` on
-   `overlay.enabled`; call `overlay.thermal_gate(hot)` where `health.degraded`
-   is set.
-3. `infer_ms = []` -> `budget = LatencyBudget.from_config(cfg)`, wrap the stages
-   named in `dms.perf.budget.STAGES`, publish `budget.timer.p95_map()` into
-   `health.latency_ms`, rename the existing key to `infer_p95` and add a real
-   `e2e_p95`, and write `budget.write(os.environ["DMS_LATENCY_BUDGET_OUT"])` on
-   shutdown when that variable is set.
-4. Record `capture_lag_ms = (time.monotonic_ns() - frame.t_mono_ns) / 1e6` as a
-   stage; it is the cheapest possible signal that the consumer has fallen behind
-   the producer.
-5. `budget.observe_rss(ram_used_mb())` in the periodic block and
-   `budget.observe_rss(dms.perf.peak_rss_mb())` at shutdown.
-6. Add a `perf:` section to `dms/config/schema.py` (`window`,
-   `gate_e2e_p95_ms`, `gate_peak_rss_mb`, `targets`) - `LatencyBudget.from_config`
-   already reads it and falls back to the built-in table when it is absent.
+| # | item | status |
+|---|---|---|
+| 1 | contiguous BGR instead of the stride-4 `full_bgra[..., :3]` view | **done** |
+| 2 | `OverlayRenderer` and the `or`/`and` bug | **done** — `want_overlay` no longer exists in `dms/app.py` |
+| 3 | `LatencyBudget` stage timers, `e2e_p95` in health, `budget.write()` on shutdown | **done** — and the gate verdict is now evaluated every health refresh, published as five `dms_perf_gate_*` gauges and one `PERF_GATE` log line per run |
+| 4 | `capture_lag_ms` as a stage | **done** |
+| 5 | `budget.observe_rss(...)` periodically and at shutdown | **done** — `peak_rss` appears in every `PERF_GATE` line |
+| 6 | a `perf:` section in `dms/config/schema.py` | **done** — `perf.gate_e2e_p95_ms: 66.0`, `perf.gate_peak_rss_mb: 5000.0` in every profile |
 
----
+What is left, in the same spirit:
+
+1. **Per-engine CUDA event reuse** in `dms/runtime/trt_engine.py` (item 8 of section
+   9, ~6 ms/frame). Not applied; `grep -c 'cudaEventCreate\|_event_pool\|_events'`
+   returns 0.
+2. **`/healthz` has no first-class `perf_gate` object.** The verdict reaches it as an
+   operator note plus the `degraded` flag, and `/metrics` as the five gauges.
+   `HealthState.as_dict` in `dms/io/health.py` is a fixed key set; a structured field
+   is a one-line addition there.
+3. **`scripts/run_all_replay.py`'s `RE_WARN` does not match the new `PERF_GATE FAIL`
+   line**, so a batch replay will not flag a gate miss.
+4. **`dms/infer/objects.py:letterbox_topleft` is a third independent letterbox
+   implementation.** `Letterbox.for_yolox` exists and is ready; collapsing them needs
+   an edit to that file.
+5. **Lock the GPU clock and re-measure on an idle board.** This is now the single
+   largest source of uncertainty in every number in this document, and it needs root.
 
 ## 12. Not measured
 
 Stated so nobody mistakes silence for a result.
 
-* **An eight-hour soak.** Every figure here is 150-200 frames. The ring buffer
-  and the reused overlay buffer are bounded by construction and tested as such,
-  but no long-run RSS curve exists. Peak RSS at 200 frames is 0.74-2.01 GiB
-  against a 5.0 GB limit.
+* **An eight-hour soak.** Every figure here is 150-300 frames — about 20 seconds of
+  clip. The ring buffer and the reused overlay buffer are bounded by construction and
+  tested as such, but **no long-run RSS curve exists, and none has ever been
+  attempted**. Peak RSS at 300 frames is 1.32-1.39 GiB against a 5.0 GB limit. Nothing
+  here says anything about hour two.
+* **Any accuracy consequence of the SCRFD 640 -> 512 swap**, other than the three
+  golden fixtures it turned red. The recall study section 7 asks for still has not
+  been run.
+* **Repeatability.** The closest thing to a repeatability measurement in this document
+  is the three-run `default.yaml` sequence in section 1, and it spans 65.3 to 79.96 ms
+  p95. Nobody has run a profile ten times and reported a distribution. Every "measured"
+  number here is n=1.
 * **The clocks-locked gate.** Needs root. See section 3.
 * **`cv2.setNumThreads`.** OpenCV runs 6 TBB threads by default and the capture
   thread, the TensorRT host code and the letterbox all compete for the same six

@@ -56,8 +56,9 @@ per-clip ON rate near 0.4 on those two is the gate being right, not missing::
     rear_end_accident         9     0         0.11               0.00
     rear_end_whiplash        18     0         0.00               0.00
 
-    (fraction of refreshes at which the gate declares sunglasses; produced by
-     /tmp/verify.py, both columns through this module's own code path)
+    (fraction of refreshes at which the gate declares sunglasses.  Both columns
+     were produced through this module's own code path, the OLD one by
+     re-instating square_box + crop_patch + a single sample.)
 
 So the change roughly triples the gate's response on the hard positive
 (``minivan`` 0.12 -> 0.42) and removes every false positive at the same time.
@@ -140,7 +141,7 @@ capability as degraded so the operator knows the gate is not running.
 """
 from __future__ import annotations
 
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, Optional, Tuple
 from collections import deque
 
 import cv2
