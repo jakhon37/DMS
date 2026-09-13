@@ -1,9 +1,39 @@
-/var/lib/dms/events.jsonl {
+# /etc/logrotate.d/dms — rotation for the AlertEvent JSONL.
+#
+# Two things to know before editing this file.
+#
+# 1. `size 50M` (what this used to say) is NOT `maxsize`. Bare `size` rotates purely
+#    on size and makes `daily` inert, so `rotate 14` meant fourteen 50 MB generations
+#    with no age bound at all — and on a quiet unit the file never rotated, because it
+#    never reached 50 MB. `maxsize` is the one that means "daily, but sooner if big".
+#
+# 2. `copytruncate` (also what this used to say) silently loses every line written
+#    between logrotate's copy and its truncate. For a safety event log that is an
+#    evidence gap. We use `create` instead: dms/io/events.py notices that the inode
+#    behind its path changed and reopens within stat_interval_s (2 s), and the
+#    postrotate SIGHUP makes it immediate. Nothing is lost either way — the few
+#    records written before the reopen land in the .1 file, in order.
+#
+# The real size bound is enforced in-process by `events.max_mb` (default 64 MB, see
+# dms/io/events.py). logrotate runs from a daily timer and cannot bound a burst.
+
+/var/lib/dms/events.jsonl
+/run/dms/events.jsonl
+{
+    su dms dms
+    create 0640 dms dms
     daily
+    maxsize 50M
     rotate 14
-    size 50M
+    maxage 30
+    dateext
+    dateformat -%Y%m%d-%s
     compress
+    delaycompress
     missingok
     notifempty
-    copytruncate
+    nocopytruncate
+    postrotate
+        systemctl kill --signal=SIGHUP --kill-who=main dms.service 2>/dev/null || true
+    endscript
 }

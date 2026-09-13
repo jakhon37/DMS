@@ -1,4 +1,24 @@
-"""SCRFD-500m face detector. Decode follows UniFace, not the uniface package."""
+"""SCRFD-500m face detector. Decode follows UniFace, not the uniface package.
+
+Input contract (both engines): RGB is NOT used - SCRFD's ONNX was exported for
+BGR input scaled as ``(px - 127.5) / 127.5``, which is what :meth:`preprocess`
+does.  The letterbox fits the frame inside the square with TOP-LEFT padding of
+zero, matching UniFace's ``resize_image``.
+
+Two engines exist and both are supported without a code change:
+
+    scrfd_500m_640_fp16_gpu.engine   1x3x640x640   12800 / 3200 / 800 anchor rows
+    scrfd_500m_512_fp16_gpu.engine   1x3x512x512    8192 / 2048 / 512 anchor rows
+
+The input size and the anchor grids are read from the engine's own binding, not
+hard-coded.  Feeding the 512 engine into a 640 grid used to be silently absorbed
+by a ``min(len(scores), len(centers))`` clamp, which mislocates every face
+instead of failing; that clamp is now an assertion.
+
+Failure behaviour: :meth:`detect` returns an empty list when nothing scores above
+``conf``.  It raises only when the engine and the decode genuinely disagree,
+which is a deployment error that must not be swallowed.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,14 +27,31 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from dms.infer import engine_input_shape, engine_io_names
 from dms.runtime.trt_engine import TrtEngine
 
 
 @dataclass
 class FaceDet:
-    xyxy: np.ndarray  # float32 [4] full-frame px
+    """One detected face.
+
+    ``xyxy`` is clipped to the frame - that is what the tracker, the ROI test
+    and the overlay want.  ``xyxy_raw`` is the unclipped decode, which is what
+    every crop must be taken from: clipping first and then centring a square on
+    the clipped box drags the crop off the face for any head at the frame edge.
+    ``kps`` are the five SCRFD keypoints in InsightFace order - image-left eye,
+    image-right eye, nose tip, image-left mouth corner, image-right mouth corner
+    - and are deliberately left unclipped for the same reason.
+    """
+
+    xyxy: np.ndarray  # float32 [4] full-frame px, clipped to the frame
     score: float
-    kps: Optional[np.ndarray] = None  # (5, 2) full-frame px
+    kps: Optional[np.ndarray] = None  # (5, 2) full-frame px, unclipped
+    xyxy_raw: Optional[np.ndarray] = None  # float32 [4] full-frame px, unclipped
+
+    def box_for_crop(self) -> np.ndarray:
+        """The box a model crop should be taken from."""
+        return self.xyxy if self.xyxy_raw is None else self.xyxy_raw
 
 
 def resize_letterbox(frame_bgr: np.ndarray, size: Tuple[int, int] = (640, 640)) -> Tuple[np.ndarray, float]:
@@ -96,15 +133,23 @@ def _as_2d(arr: np.ndarray, cols: int) -> np.ndarray:
 class ScrfdDetector:
     strides = (8, 16, 32)
     num_anchors = 2
-    input_size = (640, 640)
 
     def __init__(self, engine: TrtEngine, conf: float = 0.5, iou: float = 0.4) -> None:
         self.engine = engine
         self.conf = conf
         self.iou = iou
-        self._input_name = engine._inputs[0].name
-        self._out_names = [b.name for b in engine._outputs]
-        self._centers = {s: _anchor_centers(640, 640, s, self.num_anchors) for s in self.strides}
+        ins, outs = engine_io_names(engine)
+        self._input_name = ins[0]
+        self._out_names = list(outs)
+        shape = engine_input_shape(engine)
+        if len(shape) != 4:
+            raise RuntimeError("SCRFD engine input must be NCHW, got %s" % (shape,))
+        net_h, net_w = int(shape[2]), int(shape[3])
+        #: (width, height) of the network input, read from the engine.
+        self.input_size = (net_w, net_h)
+        self._centers = {
+            s: _anchor_centers(net_h, net_w, s, self.num_anchors) for s in self.strides
+        }
 
     def preprocess(self, bgr: np.ndarray) -> Tuple[np.ndarray, float]:
         canvas, factor = resize_letterbox(bgr, self.input_size)
@@ -129,8 +174,19 @@ class ScrfdDetector:
             bbox = _as_2d(bbox, 4) * stride
             kps = _as_2d(kps, 10) * stride
             centers = self._centers[stride]
-            n = min(scores.shape[0], centers.shape[0], bbox.shape[0])
-            scores, bbox, kps, centers = scores[:n], bbox[:n], kps[:n], centers[:n]
+            if scores.shape[0] != centers.shape[0]:
+                raise RuntimeError(
+                    "SCRFD stride %d: engine emitted %d anchor rows but the %dx%d "
+                    "grid has %d. The engine input size and the decode grid "
+                    "disagree - every box would be mislocated."
+                    % (
+                        stride,
+                        scores.shape[0],
+                        self.input_size[0],
+                        self.input_size[1],
+                        centers.shape[0],
+                    )
+                )
             pos = np.where(scores >= self.conf)[0]
             if pos.size == 0:
                 continue
@@ -149,11 +205,17 @@ class ScrfdDetector:
         h, w = orig_hw
         faces: List[FaceDet] = []
         for i in keep:
-            xyxy = np.clip(boxes[i], [0, 0, 0, 0], [w - 1, h - 1, w - 1, h - 1])
-            pts = kps[i].reshape(-1, 2)
-            pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
-            pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
-            faces.append(FaceDet(xyxy=xyxy.astype(np.float32), score=float(scores[i]), kps=pts.astype(np.float32)))
+            raw_box = boxes[i].astype(np.float32)
+            xyxy = np.clip(raw_box, [0, 0, 0, 0], [w - 1, h - 1, w - 1, h - 1]).astype(np.float32)
+            pts = kps[i].reshape(-1, 2).astype(np.float32)
+            faces.append(
+                FaceDet(
+                    xyxy=xyxy,
+                    score=float(scores[i]),
+                    kps=pts,
+                    xyxy_raw=raw_box,
+                )
+            )
         return faces
 
 

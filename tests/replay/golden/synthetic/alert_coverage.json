@@ -1,0 +1,132 @@
+{
+  "schema": "dms.alert_coverage/1",
+  "readme": "Which AlertType members the end-to-end goldens actually pin, and which they do not. Written down because nine green clip goldens read like full coverage and are not: across all nine the union of pinned alert types is only driver_changed, drowsiness_unreliable, face_lost, yawn. microsleep and perclos_high - the two alerts this product exists to raise - appear in none of them, so before the synthetic golden below existed, a change that made MICROSLEEP permanently unreachable passed every clip green. Neither golden is ground truth; both pin BEHAVIOUR. tests/test_state.py::test_the_alert_coverage_ledger_tells_the_truth recomputes every flag in this file from the fixtures themselves, so it cannot go stale silently.",
+  "clip_goldens": "tests/replay/golden/*.json - nine dashcam clips through the real pipeline on the GPU",
+  "synthetic_golden": "tests/replay/golden/synthetic/scripted_drive.json - a scripted DriverSignals stream through the real DriverMonitor, no video and no models",
+  "clip_golden_union": [
+    "driver_changed",
+    "drowsiness_unreliable",
+    "face_lost",
+    "yawn"
+  ],
+  "synthetic_golden_union": [
+    "distraction",
+    "driver_changed",
+    "drowsiness_unreliable",
+    "face_lost",
+    "fatigue_cluster",
+    "gaze_away",
+    "microsleep",
+    "model_degraded",
+    "perclos_high",
+    "phone",
+    "yawn"
+  ],
+  "not_reachable_in_any_replay": [
+    "camera_fail",
+    "disk_full",
+    "engine_fail",
+    "pipeline_starved",
+    "thermal_throttle"
+  ],
+  "why_the_clips_cannot_reach_the_drowsiness_path": "The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+  "what_is_still_not_proven": "Reachability is not accuracy. The synthetic golden proves the state machine still turns a closed-eye SIGNAL into a MICROSLEEP at the right instant. Nothing in this repository proves the perception layer produces that signal from a real closed eye: there is no cabin clip and no labelled eye closure here, and the EAR/MAR thresholds are documented starting points, not calibrations (see the header comments in dms/geometry/ear.py and dms/geometry/mar.py). Closing that needs footage, not code.",
+  "types": {
+    "camera_fail": {
+      "clip_goldens": false,
+      "synthetic_golden": false,
+      "note": "Raised by dms/app.py from the capture supervisor, never by DriverMonitor, so it cannot appear in a replay that ran to completion. Its UPSTREAM trigger is covered - tests/test_supervisor.py::test_error_emits_one_sentinel_and_a_camera_fail_enter_edge - but no test asserts the AlertEvent dms/app.py emits from it.",
+      "why_unpinned": "Raised by dms/app.py from the capture supervisor, never by DriverMonitor, so it cannot appear in a replay that ran to completion. Its UPSTREAM trigger is covered - tests/test_supervisor.py::test_error_emits_one_sentinel_and_a_camera_fail_enter_edge - but no test asserts the AlertEvent dms/app.py emits from it."
+    },
+    "disk_full": {
+      "clip_goldens": false,
+      "synthetic_golden": false,
+      "note": "Raised by dms/io/events.py and dms/io/clips.py on ENOSPC, never by DriverMonitor. Genuinely covered by a unit test that asserts the AlertType.DISK_FULL event - tests/test_events.py::test_enospc_does_not_raise_emits_disk_full_and_keeps_the_process_alive - just not by a golden, because a replay never fills the disk.",
+      "why_unpinned": "Raised by dms/io/events.py and dms/io/clips.py on ENOSPC, never by DriverMonitor. Genuinely covered by a unit test that asserts the AlertType.DISK_FULL event - tests/test_events.py::test_enospc_does_not_raise_emits_disk_full_and_keeps_the_process_alive - just not by a golden, because a replay never fills the disk."
+    },
+    "distraction": {
+      "clip_goldens": false,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by the synthetic golden ONLY - it never fires on the nine clips. The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+      "why_unpinned": ""
+    },
+    "driver_changed": {
+      "clip_goldens": true,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by both the nine clip goldens (real pipeline, real engines) and the synthetic golden.",
+      "why_unpinned": ""
+    },
+    "drowsiness_unreliable": {
+      "clip_goldens": true,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by both the nine clip goldens (real pipeline, real engines) and the synthetic golden.",
+      "why_unpinned": ""
+    },
+    "engine_fail": {
+      "clip_goldens": false,
+      "synthetic_golden": false,
+      "note": "Raised by dms/app.py when a TensorRT engine fails to load or an inference raises. NOT COVERED BY ANY TEST: the only occurrence of the name under tests/ is a manifest string assertion in tests/test_manifest.py. This is a real hole, not a structural impossibility, and it is written down here rather than left implied.",
+      "why_unpinned": "Raised by dms/app.py when a TensorRT engine fails to load or an inference raises. NOT COVERED BY ANY TEST: the only occurrence of the name under tests/ is a manifest string assertion in tests/test_manifest.py. This is a real hole, not a structural impossibility, and it is written down here rather than left implied."
+    },
+    "face_lost": {
+      "clip_goldens": true,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by both the nine clip goldens (real pipeline, real engines) and the synthetic golden.",
+      "why_unpinned": ""
+    },
+    "fatigue_cluster": {
+      "clip_goldens": false,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by the synthetic golden ONLY - it never fires on the nine clips. The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+      "why_unpinned": ""
+    },
+    "gaze_away": {
+      "clip_goldens": false,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by the synthetic golden ONLY - it never fires on the nine clips. The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+      "why_unpinned": ""
+    },
+    "microsleep": {
+      "clip_goldens": false,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by the synthetic golden ONLY - it never fires on the nine clips. The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+      "why_unpinned": ""
+    },
+    "model_degraded": {
+      "clip_goldens": false,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by the synthetic golden ONLY - it never fires on the nine clips. The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+      "why_unpinned": ""
+    },
+    "perclos_high": {
+      "clip_goldens": false,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by the synthetic golden ONLY - it never fires on the nine clips. The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+      "why_unpinned": ""
+    },
+    "phone": {
+      "clip_goldens": false,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by the synthetic golden ONLY - it never fires on the nine clips. The nine replay clips are dashcam montages of other people's cars, not cabin footage (tests/replay/CLIPS.md). Nobody in them holds their eyes shut at the camera, wears sunglasses on purpose, holds a phone, or looks away for long enough; and no clip is replayed from a calibrated profile, so gaze-derived alerts are suppressed by design (tests/test_app_integration.py::test_goldens_record_the_uncalibrated_posture).",
+      "why_unpinned": ""
+    },
+    "pipeline_starved": {
+      "clip_goldens": false,
+      "synthetic_golden": false,
+      "note": "Raised by dms/app.py when capture degrades without failing outright. The supervisor edge behind it is covered by tests/test_supervisor.py::test_pipeline_starved_edges; the AlertEvent dms/app.py emits from it is not.",
+      "why_unpinned": "Raised by dms/app.py when capture degrades without failing outright. The supervisor edge behind it is covered by tests/test_supervisor.py::test_pipeline_starved_edges; the AlertEvent dms/app.py emits from it is not."
+    },
+    "thermal_throttle": {
+      "clip_goldens": false,
+      "synthetic_golden": false,
+      "note": "Raised by dms/app.py from tegrastats. The predicate is covered by tests/test_health.py::test_thermal_throttle_thresholds and the Prometheus counter by tests/test_metrics.py; the AlertEvent itself is not, and the board cannot be made to throttle on demand.",
+      "why_unpinned": "Raised by dms/app.py from tegrastats. The predicate is covered by tests/test_health.py::test_thermal_throttle_thresholds and the Prometheus counter by tests/test_metrics.py; the AlertEvent itself is not, and the board cannot be made to throttle on demand."
+    },
+    "yawn": {
+      "clip_goldens": true,
+      "synthetic_golden": true,
+      "note": "Pinned end to end by both the nine clip goldens (real pipeline, real engines) and the synthetic golden.",
+      "why_unpinned": ""
+    }
+  }
+}

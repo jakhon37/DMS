@@ -2,5 +2,12 @@ numpy==1.23.5
 pydantic==1.10.15
 PyYAML==6.0.1
 pytest==7.4.4
-# Do NOT pip install opencv-python, tensorflow, torch, onnxruntime, uniface, jetson-stats.
-# System site-packages provide: cv2 (GStreamer), tensorrt, gi, Jetson.GPIO.
+# Runtime dependencies supplied by the L4T system site-packages, NOT by pip:
+#   cv2 4.5.4 (GStreamer, no CUDA), tensorrt 8.5.2.2, cuda-python, gi (GStreamer), Jetson.GPIO
+# Do NOT pip install: opencv-python, tensorflow, torch, onnx, onnxruntime, pycuda,
+# ultralytics, mediapipe, uniface, jetson-stats. Installing any of them breaks the
+# board (wrong CUDA/cuDNN ABI) and is a hard project rule.
+#
+# deploy/setup_jetson.sh prefers requirements.lock with `pip install --require-hashes`
+# when it exists; generate it OFF-BOARD with:
+#   pip-compile --generate-hashes -o requirements.lock requirements.txt

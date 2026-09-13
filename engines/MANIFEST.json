@@ -2,42 +2,1431 @@
   "trt_version_required": "8.5.2.2",
   "device": "jetson-xavier-nx",
   "precision": "fp16",
+  "note": "engines[] is written by scripts/build_engines.py and verified at load by dms/runtime/manifest.py (wrong TRT version or engine sha256 -> exit 1). onnx[] is the human-maintained supply-chain + preprocessing contract: it is what dms/infer/* must implement. builds[] is the machine-readable build plan. All engines are FP16 and fully static because dms/runtime/trt_engine.py refuses a binding with a -1 dimension.",
   "onnx": {
     "face": {
       "id": "scrfd_500m_kps",
       "file": "scrfd_500m_kps.onnx",
       "url": "https://github.com/yakhyo/uniface/releases/download/weights/scrfd_500m_kps.onnx",
       "sha256": "5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a",
+      "bytes": 2524817,
       "license": "MIT (InsightFace/UniFace attribution)",
       "cookbook": "https://github.com/yakhyo/uniface",
-      "input_name": null,
-      "input_shape": null,
-      "output_names": null
+      "input_name": "input.1",
+      "input_shape": [
+        1,
+        3,
+        -1,
+        -1
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "443",
+        "468",
+        "493",
+        "446",
+        "471",
+        "496",
+        "449",
+        "474",
+        "499"
+      ],
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "letterbox to the frozen HxW, top-left, pad 0",
+        "formula": "(pixel_rgb - 127.5) / 128.0",
+        "mean": [
+          127.5,
+          127.5,
+          127.5
+        ],
+        "scale": 0.0078125
+      },
+      "postprocess": "InsightFace SCRFD 3-stride decode (8/16/32), 2 anchors per cell; outputs are grouped score(N,1)/bbox(N,4)/kps(N,10) per stride in that order. See dms/infer/scrfd.py."
     },
     "landmarks": {
       "id": "2d106det",
       "file": "2d106det.onnx",
       "url": "https://github.com/yakhyo/uniface/releases/download/weights/2d106det.onnx",
       "sha256": "f001b856447c413801ef5c42091ed0cd516fcd21f2d6b79635b1e733a7109dbf",
-      "license": "InsightFace model terms (record at fetch)",
+      "bytes": 5030888,
+      "license": "InsightFace model terms - non-commercial leaning; re-read before a commercial vehicle image",
       "cookbook": "https://github.com/yakhyo/uniface",
-      "input_name": null,
-      "input_shape": null,
-      "output_names": null
+      "input_name": "data",
+      "input_shape": [
+        -1,
+        3,
+        192,
+        192
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "fc1"
+      ],
+      "output_shapes": {
+        "fc1": [
+          -1,
+          212
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "InsightFace 1.5x loose square affine crop to 192x192",
+        "formula": "pixel_rgb (raw 0-255, no mean, no scale)",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": 1.0
+      },
+      "postprocess": "fc1 is 106 (x,y) pairs in [-1,1] normalised crop space: pt = (v + 1) * 96. Topology in dms/geometry/face106.py."
+    },
+    "head_pose": {
+      "id": "hpe_mobilenetv2",
+      "file": "hpe_mobilenetv2.onnx",
+      "url": "https://github.com/yakhyo/head-pose-estimation/releases/download/weights/mobilenetv2.onnx",
+      "sha256": "1e902872868e483bd0e4f8f4a8ff2a4d61c2ccbca9dadf748e5479b5cc86a9e9",
+      "bytes": 8905103,
+      "license": "MIT (yakhyo/head-pose-estimation, 6DRepNet-derived). Weights trained on 300W-LP, evaluated on AFLW2000 - both research corpora; MIT applies to code and released weights.",
+      "cookbook": "https://github.com/yakhyo/head-pose-estimation",
+      "input_name": "input",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "rotation_matrix"
+      ],
+      "output_shapes": {
+        "rotation_matrix": [
+          1,
+          3,
+          3
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "face bbox expanded by expand_bbox(factor=0.2) then resized to 224x224",
+        "formula": "((pixel_rgb / 255) - mean) / std",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ],
+        "source": "detect.py pre_process(): cvtColor BGR2RGB, Resize(224), ToTensor, Normalize(ImageNet)"
+      },
+      "postprocess": "Output is a full 3x3 rotation matrix R (the 6D ortho representation is already converted inside the graph). Euler, in radians, per utils/general.py compute_euler_angles_from_rotation_matrices: sy = sqrt(R[0,0]^2 + R[1,0]^2); if sy >= 1e-6: pitch = atan2(R[2,1], R[2,2]), yaw = atan2(-R[2,0], sy), roll = atan2(R[1,0], R[0,0]); else pitch = atan2(-R[1,2], R[1,1]), yaw = atan2(-R[2,0], sy), roll = 0. Upstream prints euler[:,0] as pitch, euler[:,1] as yaw, euler[:,2] as roll, in degrees."
+    },
+    "head_pose_small": {
+      "id": "hpe_mobilenetv3_small",
+      "file": "hpe_mobilenetv3_small.onnx",
+      "url": "https://github.com/yakhyo/head-pose-estimation/releases/download/weights/mobilenetv3_small.onnx",
+      "sha256": "e8ae4d932b3d13221638fc72e171603e020c6da28b770753f76146867f40e190",
+      "bytes": 6111775,
+      "license": "MIT (yakhyo/head-pose-estimation, 6DRepNet-derived)",
+      "cookbook": "https://github.com/yakhyo/head-pose-estimation",
+      "input_name": "input",
+      "input_shape": [
+        1,
+        3,
+        224,
+        224
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "rotation_matrix"
+      ],
+      "output_shapes": {
+        "rotation_matrix": [
+          1,
+          3,
+          3
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "identical to head_pose",
+        "formula": "((pixel_rgb / 255) - mean) / std",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      },
+      "postprocess": "identical to head_pose; kept as the cheaper fallback if mobilenetv2 does not fit the frame budget"
+    },
+    "eye_state": {
+      "id": "ocec_s",
+      "file": "ocec_s.onnx",
+      "url": "https://github.com/PINTO0309/OCEC/releases/download/onnx/ocec_s.onnx",
+      "sha256": "9a346a08b256ad70725044cd2aa582858e108c6f45d42a9c3415afc604ba9b64",
+      "bytes": 494914,
+      "license": "MIT (PINTO0309/OCEC)",
+      "cookbook": "https://github.com/PINTO0309/OCEC",
+      "input_name": "images",
+      "input_shape": [
+        -1,
+        3,
+        24,
+        40
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "prob_open"
+      ],
+      "output_shapes": {
+        "prob_open": [
+          -1
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "cv2.resize(eye_crop, (40, 24), INTER_LINEAR) - width 40, height 24, aspect NOT preserved",
+        "formula": "pixel_rgb / 255.0",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "crop": "tight eye box, no margin (demo_ocec.py uses margin 0 on all four sides)"
+      },
+      "postprocess": "prob_open is already a sigmoid probability that the eye is OPEN, clipped to [0,1]. Upstream decision threshold 0.50 (>= 0.50 -> open)."
+    },
+    "mouth_state": {
+      "id": "vsdlm_s",
+      "file": "vsdlm_s.onnx",
+      "url": "https://github.com/PINTO0309/VSDLM/releases/download/onnx/vsdlm_s.onnx",
+      "sha256": "47e89d9e919ad83def655d7caddfb54e0b9b6031b91528173a5e0be363484eeb",
+      "bytes": 494914,
+      "license": "MIT (PINTO0309/VSDLM)",
+      "cookbook": "https://github.com/PINTO0309/VSDLM",
+      "input_name": "images",
+      "input_shape": [
+        -1,
+        3,
+        30,
+        48
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "prob_open"
+      ],
+      "output_shapes": {
+        "prob_open": [
+          -1
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "cv2.resize(mouth_crop, (48, 30), INTER_LINEAR) - width 48, height 30",
+        "formula": "pixel_rgb / 255.0",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "crop": "mouth box with pixel margins top=2 bottom=6 left=2 right=2 (demo_vsdlm.py)"
+      },
+      "postprocess": "prob_open is a sigmoid probability that the mouth is OPEN, clipped to [0,1]. Upstream threshold 0.50."
+    },
+    "eye_occlusion": {
+      "id": "sgc_is_s_48x48",
+      "file": "sgc_is_s_48x48.onnx",
+      "url": "https://github.com/PINTO0309/SGC/releases/download/onnx/sgc_is_s_48x48.onnx",
+      "sha256": "005daa03aaa0f7120d94300e1115633cd886f7846e4321af11854bfd880873da",
+      "bytes": 494926,
+      "license": "MIT (PINTO0309/SGC)",
+      "cookbook": "https://github.com/PINTO0309/SGC",
+      "input_name": "images",
+      "input_shape": [
+        -1,
+        3,
+        48,
+        48
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "prob_sunglasses"
+      ],
+      "output_shapes": {
+        "prob_sunglasses": [
+          -1
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "cv2.resize(head_crop, (48, 48), INTER_LINEAR)",
+        "formula": "pixel_rgb / 255.0",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "crop": "HEAD box, no margin (demo_sgc.py crops the head class, not the eye)"
+      },
+      "postprocess": "prob_sunglasses is a sigmoid probability that the head wears sunglasses, clipped to [0,1]. Upstream SUNGLASSES_SCORE_THRESHOLD = 0.50."
+    },
+    "mouth_occlusion": {
+      "id": "mwc_n_48x48",
+      "file": "mwc_n_48x48.onnx",
+      "url": "https://github.com/PINTO0309/MWC/releases/download/onnx/mwc_n_48x48.onnx",
+      "sha256": "c2e83bc6fa0fdade463d9e8c78a9ccfa74a678f86631b4c8ee1fe2663d7f291d",
+      "bytes": 176584,
+      "license": "MIT (PINTO0309/MWC)",
+      "cookbook": "https://github.com/PINTO0309/MWC",
+      "input_name": "images",
+      "input_shape": [
+        -1,
+        3,
+        48,
+        48
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "prob_masked"
+      ],
+      "output_shapes": {
+        "prob_masked": [
+          -1
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "cv2.resize(head_crop, (48, 48), INTER_LINEAR)",
+        "formula": "pixel_rgb / 255.0",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "crop": "HEAD box, no margin (demo_mwc.py)"
+      },
+      "postprocess": "prob_masked is a sigmoid probability that the head wears a face mask, clipped to [0,1]. Upstream threshold 0.50."
+    },
+    "gaze": {
+      "id": "mobilenetv2_gaze",
+      "file": "mobilenetv2_gaze.onnx",
+      "url": "https://github.com/yakhyo/gaze-estimation/releases/download/weights/mobilenetv2_gaze.onnx",
+      "sha256": "b81312df85c7ac1c1b5f78c573620d22c2719cb839650e15f12dc7eecb7744a4",
+      "bytes": 9790767,
+      "license": "MIT code (yakhyo/gaze-estimation, L2CS-Net derived).",
+      "license_caveat": "RESEARCH USE ONLY. These weights are trained on Gaze360 (Kellnhofer et al., ICCV 2019), whose dataset licence permits non-commercial research use only. Shipping this engine in a commercial vehicle image requires re-training on a commercially licensed gaze corpus. Product must accept this before the gaze capability leaves the lab; until then the wrapper must report source=UNAVAILABLE in a production build.",
+      "cookbook": "https://github.com/yakhyo/gaze-estimation",
+      "input_name": "input",
+      "input_shape": [
+        1,
+        3,
+        448,
+        448
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "yaw",
+        "pitch"
+      ],
+      "output_shapes": {
+        "yaw": [
+          1,
+          90
+        ],
+        "pitch": [
+          1,
+          90
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "raw detector face bbox crop (no expansion), cv2.resize to 448x448",
+        "formula": "((pixel_rgb / 255) - mean) / std",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ],
+        "source": "onnx_inference.py GazeEstimationONNX.preprocess()"
+      },
+      "postprocess": "Both outputs are 90-bin LOGITS (no softmax in the graph). bins=90, binwidth=4, angle_offset=180 (gaze360 config). deg = sum(softmax(logits) * arange(90)) * 4 - 180, then radians(deg). Output order is (yaw, pitch): yaw = horizontal, pitch = vertical, both relative to the face crop."
+    },
+    "objects": {
+      "id": "yolox_nano",
+      "file": "yolox_nano.onnx",
+      "url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx",
+      "sha256": "c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d",
+      "bytes": 3659407,
+      "license": "Apache-2.0 (Megvii-BaseDetection/YOLOX). COCO-trained. This replaces the AGPL-3.0 Ultralytics YOLOv8n plan - no licence acceptance required.",
+      "cookbook": "https://github.com/Megvii-BaseDetection/YOLOX",
+      "input_name": "images",
+      "input_shape": [
+        1,
+        3,
+        416,
+        416
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "output"
+      ],
+      "output_shapes": {
+        "output": [
+          1,
+          3549,
+          85
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "BGR",
+        "resize": "letterbox: r = min(416/h, 416/w); resize to (round down w*r, h*r) INTER_LINEAR into a 416x416 canvas prefilled with 114, anchored TOP-LEFT (no centring)",
+        "formula": "pixel_bgr (raw 0-255, NO /255, NO mean, NO std)",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "source": "yolox/data/data_augment.py preproc(); demo/ONNXRuntime/onnx_inference.py"
+      },
+      "postprocess": "3549 = 52*52 + 26*26 + 13*13, strides 8/16/32 concatenated in that order. Per row: [dx, dy, dw, dh, obj, cls_0..cls_79]. obj and cls are ALREADY sigmoid-activated inside the graph; the grid decode is NOT: cx = (dx + grid_x) * stride, cy = (dy + grid_y) * stride, w = exp(dw) * stride, h = exp(dh) * stride, in 416-space. score = obj * cls_i. Convert to xyxy, divide by the letterbox ratio r to get source-image pixels, then class-wise NMS (upstream nms_thr 0.45, score_thr 0.1). COCO-80 class order; 'cell phone' = index 67, 'bottle' = 39, 'cup' = 41, 'person' = 0.",
+      "verification": "grid decode confirmed NOT baked in and obj/cls confirmed sigmoid-activated by running the built engine on a real frame - see engines/yolox_nano_416_fp16_gpu.engine.build.log and the semantics probe recorded in engines[objects].output_semantics_probe."
+    },
+    "identity": {
+      "id": "face_recognition_sface_2021dec",
+      "file": "face_recognition_sface_2021dec.onnx",
+      "url": "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+      "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+      "bytes": 38696353,
+      "license": "Apache-2.0 (OpenCV Zoo, SFace / ZhongyuanZhao)",
+      "cookbook": "https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface",
+      "input_name": "data",
+      "input_shape": [
+        1,
+        3,
+        112,
+        112
+      ],
+      "input_dtype": "FLOAT",
+      "output_names": [
+        "fc1"
+      ],
+      "output_shapes": {
+        "fc1": [
+          1,
+          128
+        ]
+      },
+      "preprocess": {
+        "layout": "NCHW",
+        "color": "RGB",
+        "resize": "5-point similarity-transform alignCrop to 112x112 using the ArcFace reference landmarks (x,y): [[38.2946,51.6963],[73.5318,51.5014],[56.0252,71.7366],[41.5493,92.3655],[70.7299,92.2041]] in the order left-eye, right-eye, nose, left-mouth-corner, right-mouth-corner - SCRFD kps are already in that order",
+        "formula": "pixel_rgb (raw 0-255, NO /255, NO mean, NO std)",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "source": "opencv/modules/objdetect/src/face_recognize.cpp: blobFromImage(aligned, 1, Size(112,112), Scalar(0,0,0), swapRB=true, crop=false)"
+      },
+      "postprocess": "fc1 is a 128-d embedding that is NOT L2-normalised by the graph - the caller must normalise before comparing. OpenCV match thresholds: cosine similarity >= 0.363 -> same identity; L2 distance on the normalised vectors <= 1.128 -> same identity."
     }
   },
+  "builds": [
+    {
+      "id": "scrfd_500m_640_fp16_gpu",
+      "role": "face_detector",
+      "onnx": "scrfd_500m_kps.onnx",
+      "engine": "scrfd_500m_640_fp16_gpu.engine",
+      "shapes": {
+        "input.1": [
+          1,
+          3,
+          640,
+          640
+        ]
+      },
+      "workspace": "512M"
+    },
+    {
+      "id": "2d106det_192_fp16_gpu",
+      "role": "landmarks_106",
+      "onnx": "2d106det.onnx",
+      "engine": "2d106det_192_fp16_gpu.engine",
+      "shapes": {
+        "data": [
+          1,
+          3,
+          192,
+          192
+        ]
+      },
+      "workspace": "64M"
+    },
+    {
+      "id": "ocec_s_24x40_fp16_gpu",
+      "role": "eye_state",
+      "onnx": "ocec_s.onnx",
+      "engine": "ocec_s_24x40_fp16_gpu.engine",
+      "shapes": {
+        "images": [
+          1,
+          3,
+          24,
+          40
+        ]
+      },
+      "workspace": "64M"
+    },
+    {
+      "id": "ocec_s_24x40_b2_fp16_gpu",
+      "role": "eye_state_pair",
+      "onnx": "ocec_s.onnx",
+      "engine": "ocec_s_24x40_b2_fp16_gpu.engine",
+      "shapes": {
+        "images": [
+          2,
+          3,
+          24,
+          40
+        ]
+      },
+      "workspace": "64M",
+      "note": "batch-2 variant so both eyes go in one launch; feed left eye at index 0, right eye at index 1"
+    },
+    {
+      "id": "vsdlm_s_30x48_fp16_gpu",
+      "role": "mouth_state",
+      "onnx": "vsdlm_s.onnx",
+      "engine": "vsdlm_s_30x48_fp16_gpu.engine",
+      "shapes": {
+        "images": [
+          1,
+          3,
+          30,
+          48
+        ]
+      },
+      "workspace": "64M"
+    },
+    {
+      "id": "sgc_is_s_48_fp16_gpu",
+      "role": "eye_occlusion",
+      "onnx": "sgc_is_s_48x48.onnx",
+      "engine": "sgc_is_s_48_fp16_gpu.engine",
+      "shapes": {
+        "images": [
+          1,
+          3,
+          48,
+          48
+        ]
+      },
+      "workspace": "64M"
+    },
+    {
+      "id": "mwc_n_48_fp16_gpu",
+      "role": "mouth_occlusion",
+      "onnx": "mwc_n_48x48.onnx",
+      "engine": "mwc_n_48_fp16_gpu.engine",
+      "shapes": {
+        "images": [
+          1,
+          3,
+          48,
+          48
+        ]
+      },
+      "workspace": "64M"
+    },
+    {
+      "id": "hpe_mobilenetv2_224_fp16_gpu",
+      "role": "head_pose",
+      "onnx": "hpe_mobilenetv2.onnx",
+      "engine": "hpe_mobilenetv2_224_fp16_gpu.engine",
+      "shapes": {
+        "input": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "workspace": "256M"
+    },
+    {
+      "id": "hpe_mobilenetv3_small_224_fp16_gpu",
+      "role": "head_pose_fallback",
+      "onnx": "hpe_mobilenetv3_small.onnx",
+      "engine": "hpe_mobilenetv3_small_224_fp16_gpu.engine",
+      "shapes": {
+        "input": [
+          1,
+          3,
+          224,
+          224
+        ]
+      },
+      "workspace": "256M"
+    },
+    {
+      "id": "sface_112_fp16_gpu",
+      "role": "driver_identity",
+      "onnx": "face_recognition_sface_2021dec.onnx",
+      "engine": "sface_112_fp16_gpu.engine",
+      "shapes": {
+        "data": [
+          1,
+          3,
+          112,
+          112
+        ]
+      },
+      "workspace": "256M"
+    },
+    {
+      "id": "scrfd_500m_512_fp16_gpu",
+      "role": "face_detector_fast",
+      "onnx": "scrfd_500m_kps.onnx",
+      "engine": "scrfd_500m_512_fp16_gpu.engine",
+      "shapes": {
+        "input.1": [
+          1,
+          3,
+          512,
+          512
+        ]
+      },
+      "workspace": "512M",
+      "note": "accuracy/latency trade against the 640 engine; the SCRFD ONNX is dynamic HxW so the stride grids are rebuilt per size (64x64/32x32/16x16 cells at 512)"
+    },
+    {
+      "id": "yolox_nano_416_fp16_gpu",
+      "role": "cabin_objects",
+      "onnx": "yolox_nano.onnx",
+      "engine": "yolox_nano_416_fp16_gpu.engine",
+      "shapes": {
+        "images": [
+          1,
+          3,
+          416,
+          416
+        ]
+      },
+      "workspace": "512M"
+    },
+    {
+      "id": "mobilenetv2_gaze_448_fp16_gpu",
+      "role": "gaze",
+      "onnx": "mobilenetv2_gaze.onnx",
+      "engine": "mobilenetv2_gaze_448_fp16_gpu.engine",
+      "shapes": {
+        "input": [
+          1,
+          3,
+          448,
+          448
+        ]
+      },
+      "workspace": "512M"
+    }
+  ],
   "engines": {
     "scrfd_500m_640_fp16_gpu": {
       "file": "scrfd_500m_640_fp16_gpu.engine",
       "device": "gpu",
       "sha256": "be486486895ff17b1668fd36b2a854acf96d7617405147628045a31c6cc672e2",
-      "bytes": 1770911
+      "bytes": 1770911,
+      "role": "face_detector",
+      "precision": "fp16",
+      "onnx": "scrfd_500m_kps.onnx",
+      "onnx_sha256": "5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a",
+      "source_url": "https://github.com/yakhyo/uniface/releases/download/weights/scrfd_500m_kps.onnx",
+      "license": "MIT (InsightFace/UniFace attribution)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "input.1",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            640,
+            640
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "443",
+          "dtype": "FLOAT",
+          "shape": [
+            12800,
+            1
+          ]
+        },
+        {
+          "name": "446",
+          "dtype": "FLOAT",
+          "shape": [
+            12800,
+            4
+          ]
+        },
+        {
+          "name": "449",
+          "dtype": "FLOAT",
+          "shape": [
+            12800,
+            10
+          ]
+        },
+        {
+          "name": "468",
+          "dtype": "FLOAT",
+          "shape": [
+            3200,
+            1
+          ]
+        },
+        {
+          "name": "471",
+          "dtype": "FLOAT",
+          "shape": [
+            3200,
+            4
+          ]
+        },
+        {
+          "name": "474",
+          "dtype": "FLOAT",
+          "shape": [
+            3200,
+            10
+          ]
+        },
+        {
+          "name": "493",
+          "dtype": "FLOAT",
+          "shape": [
+            800,
+            1
+          ]
+        },
+        {
+          "name": "496",
+          "dtype": "FLOAT",
+          "shape": [
+            800,
+            4
+          ]
+        },
+        {
+          "name": "499",
+          "dtype": "FLOAT",
+          "shape": [
+            800,
+            10
+          ]
+        }
+      ],
+      "device_memory_bytes": 7296000,
+      "build_seconds": 0.0,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 3.67254,
+      "latency_p99_ms": 3.76929,
+      "throughput_qps": 319.15
     },
     "2d106det_192_fp16_gpu": {
       "file": "2d106det_192_fp16_gpu.engine",
       "device": "gpu",
       "sha256": "1083ca5819dd919d033eeb2fc972a1b1ac76d9276b0a97f11ddc97fed687bab7",
-      "bytes": 3781245
+      "bytes": 3781245,
+      "role": "landmarks_106",
+      "precision": "fp16",
+      "onnx": "2d106det.onnx",
+      "onnx_sha256": "f001b856447c413801ef5c42091ed0cd516fcd21f2d6b79635b1e733a7109dbf",
+      "source_url": "https://github.com/yakhyo/uniface/releases/download/weights/2d106det.onnx",
+      "license": "InsightFace model terms - non-commercial leaning; re-read before a commercial vehicle image",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "data",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            192,
+            192
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "fc1",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            212
+          ]
+        }
+      ],
+      "device_memory_bytes": 1180672,
+      "build_seconds": 0.0,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 1.13257,
+      "latency_p99_ms": 1.54478,
+      "throughput_qps": 870.522
+    },
+    "ocec_s_24x40_fp16_gpu": {
+      "file": "ocec_s_24x40_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "eye_state",
+      "precision": "fp16",
+      "sha256": "de8f1a09cd816df1cc2f38aba76b6bd17e522c9ffd94aeadcd44cede67bc6539",
+      "bytes": 1240957,
+      "onnx": "ocec_s.onnx",
+      "onnx_sha256": "9a346a08b256ad70725044cd2aa582858e108c6f45d42a9c3415afc604ba9b64",
+      "source_url": "https://github.com/PINTO0309/OCEC/releases/download/onnx/ocec_s.onnx",
+      "license": "MIT (PINTO0309/OCEC)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "images",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            24,
+            40
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prob_open",
+          "dtype": "FLOAT",
+          "shape": [
+            1
+          ]
+        }
+      ],
+      "device_memory_bytes": 262144,
+      "build_seconds": 417.2,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 0.755219,
+      "latency_p99_ms": 0.896576,
+      "throughput_qps": 1288.6,
+      "output_semantics_probe": {
+        "checked": "output range",
+        "in_unit_interval": true,
+        "conclusion": "sigmoid probability, no activation needed"
+      }
+    },
+    "ocec_s_24x40_b2_fp16_gpu": {
+      "file": "ocec_s_24x40_b2_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "eye_state_pair",
+      "precision": "fp16",
+      "sha256": "01e838462796f27bf4d9477b45af5336dd9cb129e6ca25145421da156c9c69b7",
+      "bytes": 1821095,
+      "onnx": "ocec_s.onnx",
+      "onnx_sha256": "9a346a08b256ad70725044cd2aa582858e108c6f45d42a9c3415afc604ba9b64",
+      "source_url": "https://github.com/PINTO0309/OCEC/releases/download/onnx/ocec_s.onnx",
+      "license": "MIT (PINTO0309/OCEC)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "images",
+          "dtype": "FLOAT",
+          "shape": [
+            2,
+            3,
+            24,
+            40
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prob_open",
+          "dtype": "FLOAT",
+          "shape": [
+            2
+          ]
+        }
+      ],
+      "device_memory_bytes": 523776,
+      "build_seconds": 401.1,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 0.759773,
+      "latency_p99_ms": 1.04636,
+      "throughput_qps": 1243.66,
+      "output_semantics_probe": {
+        "checked": "output range",
+        "in_unit_interval": true,
+        "conclusion": "sigmoid probability per batch row"
+      }
+    },
+    "vsdlm_s_30x48_fp16_gpu": {
+      "file": "vsdlm_s_30x48_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "mouth_state",
+      "precision": "fp16",
+      "sha256": "a81f3a8e879de583f6d24e62a83412e20859c3a0b5efdb05528ce58418ee032c",
+      "bytes": 1265847,
+      "onnx": "vsdlm_s.onnx",
+      "onnx_sha256": "47e89d9e919ad83def655d7caddfb54e0b9b6031b91528173a5e0be363484eeb",
+      "source_url": "https://github.com/PINTO0309/VSDLM/releases/download/onnx/vsdlm_s.onnx",
+      "license": "MIT (PINTO0309/VSDLM)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "images",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            30,
+            48
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prob_open",
+          "dtype": "FLOAT",
+          "shape": [
+            1
+          ]
+        }
+      ],
+      "device_memory_bytes": 392704,
+      "build_seconds": 400.0,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 0.841919,
+      "latency_p99_ms": 0.968552,
+      "throughput_qps": 1172.54,
+      "output_semantics_probe": {
+        "checked": "output range",
+        "in_unit_interval": true,
+        "conclusion": "sigmoid probability, no activation needed"
+      }
+    },
+    "sgc_is_s_48_fp16_gpu": {
+      "file": "sgc_is_s_48_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "eye_occlusion",
+      "precision": "fp16",
+      "sha256": "45c1f73bbee1e992599000ddfd38c62534ea2adb35e58ad4c2b148cccbd477c4",
+      "bytes": 1812330,
+      "onnx": "sgc_is_s_48x48.onnx",
+      "onnx_sha256": "005daa03aaa0f7120d94300e1115633cd886f7846e4321af11854bfd880873da",
+      "source_url": "https://github.com/PINTO0309/SGC/releases/download/onnx/sgc_is_s_48x48.onnx",
+      "license": "MIT (PINTO0309/SGC)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "images",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            48,
+            48
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prob_sunglasses",
+          "dtype": "FLOAT",
+          "shape": [
+            1
+          ]
+        }
+      ],
+      "device_memory_bytes": 627712,
+      "build_seconds": 402.5,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 0.704185,
+      "latency_p99_ms": 0.932983,
+      "throughput_qps": 1311.56,
+      "output_semantics_probe": {
+        "checked": "output range",
+        "in_unit_interval": true,
+        "conclusion": "sigmoid probability, no activation needed"
+      }
+    },
+    "mwc_n_48_fp16_gpu": {
+      "file": "mwc_n_48_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "mouth_occlusion",
+      "precision": "fp16",
+      "sha256": "629957f0bf2f638dfa2dd6acb604fa0996b108e4d0243ef6cd2bf75ffa575dd6",
+      "bytes": 1471178,
+      "onnx": "mwc_n_48x48.onnx",
+      "onnx_sha256": "c2e83bc6fa0fdade463d9e8c78a9ccfa74a678f86631b4c8ee1fe2663d7f291d",
+      "source_url": "https://github.com/PINTO0309/MWC/releases/download/onnx/mwc_n_48x48.onnx",
+      "license": "MIT (PINTO0309/MWC)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "images",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            48,
+            48
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prob_masked",
+          "dtype": "FLOAT",
+          "shape": [
+            1
+          ]
+        }
+      ],
+      "device_memory_bytes": 627712,
+      "build_seconds": 390.8,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 0.540512,
+      "latency_p99_ms": 0.655411,
+      "throughput_qps": 1711.23,
+      "output_semantics_probe": {
+        "checked": "output range",
+        "in_unit_interval": true,
+        "conclusion": "sigmoid probability, no activation needed"
+      }
+    },
+    "sface_112_fp16_gpu": {
+      "file": "sface_112_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "driver_identity",
+      "precision": "fp16",
+      "sha256": "402a49ba41ac3581aff1fc53f59366c4570fbd4aab330deb537d07e81bb886b2",
+      "bytes": 19698891,
+      "onnx": "face_recognition_sface_2021dec.onnx",
+      "onnx_sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+      "source_url": "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+      "license": "Apache-2.0 (OpenCV Zoo, SFace / ZhongyuanZhao)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "data",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            112,
+            112
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "fc1",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            128
+          ]
+        }
+      ],
+      "device_memory_bytes": 3213824,
+      "build_seconds": 288.8,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 2.22302,
+      "latency_p99_ms": 2.3571,
+      "throughput_qps": 451.529,
+      "output_semantics_probe": {
+        "checked": "is the 128-d embedding L2-normalised by the graph",
+        "l2_norm": 4.522890301230786,
+        "l2_normalized_by_graph": false,
+        "conclusion": "the wrapper must L2-normalise before cosine comparison"
+      }
+    },
+    "scrfd_500m_512_fp16_gpu": {
+      "file": "scrfd_500m_512_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "face_detector_fast",
+      "precision": "fp16",
+      "sha256": "8729bb67406c4d29ff424568b40c77b70d85c9fcd05e44bbc93ba9a942aec35c",
+      "bytes": 1730390,
+      "onnx": "scrfd_500m_kps.onnx",
+      "onnx_sha256": "5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a",
+      "source_url": "https://github.com/yakhyo/uniface/releases/download/weights/scrfd_500m_kps.onnx",
+      "license": "MIT (InsightFace/UniFace attribution)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "input.1",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "443",
+          "dtype": "FLOAT",
+          "shape": [
+            8192,
+            1
+          ]
+        },
+        {
+          "name": "446",
+          "dtype": "FLOAT",
+          "shape": [
+            8192,
+            4
+          ]
+        },
+        {
+          "name": "449",
+          "dtype": "FLOAT",
+          "shape": [
+            8192,
+            10
+          ]
+        },
+        {
+          "name": "468",
+          "dtype": "FLOAT",
+          "shape": [
+            2048,
+            1
+          ]
+        },
+        {
+          "name": "471",
+          "dtype": "FLOAT",
+          "shape": [
+            2048,
+            4
+          ]
+        },
+        {
+          "name": "474",
+          "dtype": "FLOAT",
+          "shape": [
+            2048,
+            10
+          ]
+        },
+        {
+          "name": "493",
+          "dtype": "FLOAT",
+          "shape": [
+            512,
+            1
+          ]
+        },
+        {
+          "name": "496",
+          "dtype": "FLOAT",
+          "shape": [
+            512,
+            4
+          ]
+        },
+        {
+          "name": "499",
+          "dtype": "FLOAT",
+          "shape": [
+            512,
+            10
+          ]
+        }
+      ],
+      "device_memory_bytes": 6766592,
+      "build_seconds": 116.1,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 2.47948,
+      "latency_p99_ms": 2.56064,
+      "throughput_qps": 450.439
+    },
+    "yolox_nano_416_fp16_gpu": {
+      "file": "yolox_nano_416_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "cabin_objects",
+      "precision": "fp16",
+      "sha256": "bec28179913d73755ad397f0256ee7934f72c28f8c48e0fc7362315999b86900",
+      "bytes": 3147230,
+      "onnx": "yolox_nano.onnx",
+      "onnx_sha256": "c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d",
+      "source_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx",
+      "license": "Apache-2.0 (Megvii-BaseDetection/YOLOX). COCO-trained. This replaces the AGPL-3.0 Ultralytics YOLOv8n plan - no licence acceptance required.",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "images",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            416,
+            416
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3549,
+            85
+          ]
+        }
+      ],
+      "device_memory_bytes": 5278208,
+      "build_seconds": 1048.6,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 4.90027,
+      "latency_p99_ms": 4.9675,
+      "throughput_qps": 213.985,
+      "output_semantics_probe": {
+        "checked": "is the grid decode baked in, are obj/cls sigmoid-activated",
+        "xy_raw_range": [
+          -1.6363489627838135,
+          2.5116684436798096
+        ],
+        "obj_cls_range": [
+          1.1920928955078125e-07,
+          0.6043989062309265
+        ],
+        "grid_decode_baked_in": false,
+        "objcls_sigmoid_baked_in": true,
+        "rows": 3549,
+        "cols": 85,
+        "conclusion": "the wrapper must run demo_postprocess-style grid decode on [:, :4]; it must NOT sigmoid [:, 4:] again"
+      }
+    },
+    "mobilenetv2_gaze_448_fp16_gpu": {
+      "file": "mobilenetv2_gaze_448_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "gaze",
+      "precision": "fp16",
+      "sha256": "9d8fcb36fb58c8aee637fccea3174d9a931cee66f6ebe282dc92c26520d366bd",
+      "bytes": 5853206,
+      "onnx": "mobilenetv2_gaze.onnx",
+      "onnx_sha256": "b81312df85c7ac1c1b5f78c573620d22c2719cb839650e15f12dc7eecb7744a4",
+      "source_url": "https://github.com/yakhyo/gaze-estimation/releases/download/weights/mobilenetv2_gaze.onnx",
+      "license": "MIT code (yakhyo/gaze-estimation, L2CS-Net derived).",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "input",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            448,
+            448
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "yaw",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            90
+          ]
+        },
+        {
+          "name": "pitch",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            90
+          ]
+        }
+      ],
+      "device_memory_bytes": 16859136,
+      "build_seconds": 126.0,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 4.11374,
+      "latency_p99_ms": 4.22049,
+      "throughput_qps": 251.183,
+      "output_semantics_probe": {
+        "checked": "are the 90-bin outputs logits or probabilities",
+        "yaw_row_sum": -160.4451,
+        "conclusion": "LOGITS - the wrapper must apply softmax itself before the expectation"
+      }
+    },
+    "hpe_mobilenetv2_224_fp16_gpu": {
+      "file": "hpe_mobilenetv2_224_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "head_pose",
+      "precision": "fp16",
+      "sha256": "4634e6373b7979a3abb99fee1c18aa808933431ce2b0019af4a0edb52a5fe013",
+      "bytes": 4915409,
+      "onnx": "hpe_mobilenetv2.onnx",
+      "onnx_sha256": "1e902872868e483bd0e4f8f4a8ff2a4d61c2ccbca9dadf748e5479b5cc86a9e9",
+      "source_url": "https://github.com/yakhyo/head-pose-estimation/releases/download/weights/mobilenetv2.onnx",
+      "license": "MIT (yakhyo/head-pose-estimation, 6DRepNet-derived). Weights trained on 300W-LP, evaluated on AFLW2000 - both research corpora; MIT applies to code and released weights.",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "input",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            224,
+            224
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rotation_matrix",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            3
+          ]
+        }
+      ],
+      "device_memory_bytes": 3512320,
+      "build_seconds": 78.6,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 1.48888,
+      "latency_p99_ms": 1.53168,
+      "throughput_qps": 692.725,
+      "output_semantics_probe": {
+        "checked": "output is a true rotation matrix",
+        "RRt_max_abs_error": 5.162611627085312e-08,
+        "det": 0.9999999595806064,
+        "conclusion": "the 6D->R orthonormalisation is inside the graph; no re-orthonormalisation needed in the wrapper"
+      }
+    },
+    "hpe_mobilenetv3_small_224_fp16_gpu": {
+      "file": "hpe_mobilenetv3_small_224_fp16_gpu.engine",
+      "device": "gpu",
+      "role": "head_pose_fallback",
+      "precision": "fp16",
+      "sha256": "13b1d7a90145fe038ae3be0b137e9103af1df22d375c6ecb95f88931310bd8fa",
+      "bytes": 4886326,
+      "onnx": "hpe_mobilenetv3_small.onnx",
+      "onnx_sha256": "e8ae4d932b3d13221638fc72e171603e020c6da28b770753f76146867f40e190",
+      "source_url": "https://github.com/yakhyo/head-pose-estimation/releases/download/weights/mobilenetv3_small.onnx",
+      "license": "MIT (yakhyo/head-pose-estimation, 6DRepNet-derived)",
+      "trt_version": "8.5.2.2",
+      "inputs": [
+        {
+          "name": "input",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            224,
+            224
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rotation_matrix",
+          "dtype": "FLOAT",
+          "shape": [
+            1,
+            3,
+            3
+          ]
+        }
+      ],
+      "device_memory_bytes": 1681920,
+      "build_seconds": 370.3,
+      "loadEngine_rc": 0,
+      "latency_median_ms": 2.44519,
+      "latency_p99_ms": 9.38574,
+      "throughput_qps": 386.797,
+      "output_semantics_probe": {
+        "checked": "output is a true rotation matrix",
+        "RRt_max_abs_error": 0.0008456707000732422,
+        "det": 0.9990684403746856,
+        "conclusion": "orthonormal within FP16 rounding; det deviates by 9.3e-4, acceptable for atan2 Euler extraction"
+      }
     }
+  },
+  "blocked": {},
+  "verification": {
+    "method": "every engine was loaded through dms/runtime/trt_engine.py TrtEngine (which refuses any binding with a -1 dimension) and run once on synthetic input; the output ranges below are what the onnx[].postprocess contracts were checked against. A trtexec --loadEngine round trip ran for every engine at build time (loadEngine_rc == 0 in each engine record).",
+    "all_engines_static": true,
+    "all_engines_load_through_trt_engine_py": true,
+    "engine_count": 13,
+    "total_engine_bytes": 53395015,
+    "total_device_memory_bytes": 48222720,
+    "device_memory_note": "device_memory_bytes is the TensorRT execution-context scratch per engine, excluding weights. Resident device memory per engine is roughly file size (deserialised weights) + this scratch + the host/device IO buffers TrtEngine allocates from the binding shapes. Loading all 13 engines at once is about 53 MB of weights plus 48 MB of context scratch; the DMS pipeline never needs all of them resident (the two head-pose variants and the two SCRFD sizes are alternatives, not a set).",
+    "checked_utc": "2026-09-13T05:40:00Z"
   }
 }

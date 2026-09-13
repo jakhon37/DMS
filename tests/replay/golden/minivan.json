@@ -1,0 +1,26 @@
+{
+  "alerts": {
+    "drowsiness_unreliable": {
+      "enter": [
+        0,
+        2
+      ]
+    }
+  },
+  "clip": "tests/replay/minivan.mp4",
+  "config": "configs/minivan.yaml",
+  "face_hits": [
+    901,
+    1501
+  ],
+  "frames": 300,
+  "max_frames": 300,
+  "note": "Bands pin software behaviour, not ground truth: these clips are dashcam montages with no labelled drowsiness events. Latency is reference only - this board's GPU governor moves an identical inference by up to 5x.",
+  "recorded_utc": "2026-09-13T01:37:01Z",
+  "reference_latency_ms": {
+    "e2e_p50": 57.3,
+    "e2e_p95": 82.1,
+    "mean_infer": 57.6
+  },
+  "schema": "dms.replay_golden/2"
+}

@@ -1,25 +1,125 @@
 [Unit]
-Description=Driver Monitoring System
-After=nvargus-daemon.service
+# Driver Monitoring System — safety-relevant, must come back up on its own.
+Description=Driver Monitoring System (Xavier NX)
+Documentation=file:/opt/dms/current/deploy/README.md
+After=nvargus-daemon.service local-fs.target
 Wants=nvargus-daemon.service
+# A crash loop must land in `failed` (visible, alertable) rather than restarting for
+# ever: 5 starts in 5 minutes and systemd gives up. Pair with an OnFailure= unit when
+# the fleet has one — see deploy/README.md.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=notify
+NotifyAccess=main
 User=dms
 Group=dms
+# video: /dev/video* and the nvargus socket. gpio: /dev/gpiochip* for the alert pin.
 SupplementaryGroups=video gpio
-WorkingDirectory=/opt/dms
+
+# /opt/dms/current is a symlink to /opt/dms/releases/<git-sha>, swapped atomically by
+# deploy/setup_jetson.sh. Rollback is one symlink change plus a restart.
+WorkingDirectory=/opt/dms/current
+ExecStart=/opt/dms/current/.venv/bin/python -m dms.app --config /etc/dms/default.yaml --detect
+
 Environment=PYTHONUNBUFFERED=1
+# The code tree is read-only under ProtectSystem=strict; writing .pyc would fail.
+Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/local/cuda-11.4/lib64
-ExecStart=/opt/dms/.venv/bin/python -m dms.app --config /etc/dms/default.yaml --detect
-Restart=on-failure
-RestartSec=2
+
+# --- restart and watchdog -----------------------------------------------------
+# always, not on-failure: a clean exit(0) from any code path must not silently end
+# driver monitoring for the rest of the drive.
+Restart=always
+RestartSec=5
+# Engine deserialisation of the full model set takes ~20 s cold; 90 s is generous.
 TimeoutStartSec=90
+TimeoutStopSec=15
+# The watchdog deadline only starts counting after READY=1, so it is independent of
+# TimeoutStartSec. The application pings at WatchdogSec/2 and — critically — only
+# while the frame id is advancing, so a hung pipeline is killed and restarted.
 WatchdogSec=30
+
+# --- resource limits ----------------------------------------------------------
+# 6.7 GiB board, ~2.5 GiB typically free. The design budget is < 5.0 GB RSS; without
+# a cap this process OOMs the whole system instead of being restarted.
+MemoryHigh=4500M
+MemoryMax=5G
+OOMPolicy=stop
+TasksMax=256
 LimitNOFILE=4096
+# A core dump of this process contains in-cabin frames of the driver's face.
+LimitCORE=0
+
+# --- state, runtime and log directories ---------------------------------------
+# systemd creates and chowns these; 0750 keeps the driver's alert history off every
+# other local account (the default 0755 did not).
 StateDirectory=dms
+StateDirectoryMode=0750
 RuntimeDirectory=dms
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0750
+LogsDirectory=dms
+LogsDirectoryMode=0750
+UMask=0027
+
+# --- sandboxing ---------------------------------------------------------------
+NoNewPrivileges=true
+# Code and config are root-owned and read-only to this service: the process must not
+# be able to rewrite engines/MANIFEST.json (its own integrity check) or /etc/dms.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dms /run/dms /var/log/dms
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+# AF_UNIX: $NOTIFY_SOCKET and the nvargus daemon. AF_NETLINK: NVIDIA userspace
+# queries the device list. AF_INET/AF_INET6: the loopback health endpoint.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+# NOT set: MemoryDenyWriteExecute — the CUDA/TensorRT runtime JITs and needs W+X.
+# NOT set: PrivateDevices — it would hide /dev/nvhost-*, /dev/nvmap and /dev/video*.
+
+# The two directives below tighten the sandbox further but MUST be validated with a
+# real boot on a board with sudo before being enabled; a wrong device list or a
+# syscall the CUDA runtime needs turns into a start failure, and this repository has
+# no root access to test it. deploy/README.md § "Validating the tight sandbox" has
+# the exact procedure.
+#DevicePolicy=closed
+#DeviceAllow=/dev/nvhost-ctrl rw
+#DeviceAllow=/dev/nvhost-ctrl-gpu rw
+#DeviceAllow=/dev/nvhost-gpu rw
+#DeviceAllow=/dev/nvhost-as-gpu rw
+#DeviceAllow=/dev/nvhost-prof-gpu rw
+#DeviceAllow=/dev/nvhost-dbg-gpu rw
+#DeviceAllow=/dev/nvhost-nvdec rw
+#DeviceAllow=/dev/nvhost-msenc rw
+#DeviceAllow=/dev/nvmap rw
+#DeviceAllow=/dev/nvhost-vic rw
+#DeviceAllow=char-video4linux rw
+#DeviceAllow=char-gpiochip rw
+#SystemCallFilter=@system-service
+#SystemCallErrorNumber=EPERM
+#SystemCallArchitectures=native
+
+# --- logging ------------------------------------------------------------------
+# dms/jsonlog.py writes one JSON object per line to stdout; journald keeps it as the
+# MESSAGE field, so `journalctl -u dms -o cat | jq` works directly.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dms
+# Alert bursts must not be dropped by journald's default 1000 messages / 30 s.
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=10000
 
 [Install]
 WantedBy=multi-user.target

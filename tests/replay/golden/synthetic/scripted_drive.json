@@ -1,0 +1,91 @@
+{
+  "alerts": {
+    "distraction": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 111.0
+    },
+    "driver_changed": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 185.0
+    },
+    "drowsiness_unreliable": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 140.9167
+    },
+    "face_lost": {
+      "edges": {
+        "enter": 1,
+        "escalate": 1,
+        "exit": 1
+      },
+      "first_enter_s": 155.9167
+    },
+    "fatigue_cluster": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 96.4167
+    },
+    "gaze_away": {
+      "edges": {
+        "enter": 1,
+        "escalate": 1,
+        "exit": 1
+      },
+      "first_enter_s": 107.0
+    },
+    "microsleep": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 41.5
+    },
+    "model_degraded": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 176.9167
+    },
+    "perclos_high": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 31.9167
+    },
+    "phone": {
+      "edges": {
+        "enter": 1,
+        "exit": 1
+      },
+      "first_enter_s": 125.75
+    },
+    "yawn": {
+      "edges": {
+        "enter": 3,
+        "exit": 3
+      },
+      "first_enter_s": 60.4167
+    }
+  },
+  "config": "configs/default.yaml",
+  "duration_s": 200.0,
+  "fps": 12.0,
+  "frames": 2400,
+  "note": "Scripted DriverSignals replayed through the real DriverMonitor. No video, no models, no GPU: this pins the STATE MACHINE end to end, and exists because the nine dashcam replay clips cannot reach microsleep or perclos_high. Counts are exact because the drive is pure arithmetic over a fixed sequence; timings carry +/- 2 frames. Not ground truth - it pins behaviour, not accuracy.",
+  "schema": "dms.synthetic_golden/1",
+  "source": "tests/test_state.py::synthetic_script",
+  "timing_slack_s": 0.166667
+}
