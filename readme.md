@@ -1,14 +1,19 @@
-# DMS — Driver Monitoring System (Jetson Xavier NX)
+# DMS: Driver Monitoring on Jetson Xavier NX
 
-In-cabin drowsiness / distraction pipeline for **this** Xavier NX (JetPack 5.1.6, TensorRT 8.5, Python 3.8). Replay-first: there is **no camera** on the board.
+In-cabin drowsiness and distraction pipeline on a Jetson Xavier NX (JetPack 5.1.6, TensorRT 8.5, Python 3.8). It runs as a replay lab on recorded clips, because no camera is attached to the board.
 
-**Not production-ready.** Pause snapshot: [`docs/STATUS.md`](docs/STATUS.md). Architecture: [`docs/production-dms-design.md`](docs/production-dms-design.md). Gap plan: [`docs/production-readiness.md`](docs/production-readiness.md).
+**Not production-ready. Development paused on 2026-09-09.** Snapshot: [`docs/STATUS.md`](docs/STATUS.md). Architecture: [`docs/production-dms-design.md`](docs/production-dms-design.md). Gap plan: [`docs/production-readiness.md`](docs/production-readiness.md).
 
-## Do not
+## Status
 
-- `pip install uniface`, `opencv-python`, TensorFlow, Torch, or ONNX Runtime
-- Call `nvpmodel` / `jetson_clocks` from the app
-- Treat YouTube ROI yaml as vehicle calibration
+| Working in the replay lab | Not done yet |
+| --- | --- |
+| File and test-source GStreamer input at 720p | CSI or USB camera |
+| SCRFD-500m detector and 2d106det landmarks in TensorRT FP16 | 15 FPS / 66 ms end-to-end target (inference is about 80 ms) |
+| EAR, MAR and PnP head pose, IoU tracks, driver vs passenger | Trusted gaze (PnP is noisy on uncalibrated clips) |
+| Alert state machines and JSONL events | Clip ring, phone detection, 8-hour soak |
+| systemd unit file and `/healthz` | Service enabled on the board |
+| Nine local clips with per-clip ROI config | Clips in CI |
 
 ## Layout
 
@@ -46,6 +51,12 @@ PYTHONPATH=. python3.8 -m dms.app --config configs/default.yaml --detect --max-f
 ```
 
 Health while running: `http://127.0.0.1:8088/healthz`. Lab alerts append to `data/events.jsonl`.
+
+## Constraints on this board
+
+- Do not `pip install uniface`, `opencv-python`, TensorFlow, Torch, or ONNX Runtime.
+- Do not call `nvpmodel` / `jetson_clocks` from the app.
+- Do not treat YouTube ROI yaml as vehicle calibration.
 
 ## Replay
 
